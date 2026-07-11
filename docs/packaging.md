@@ -29,8 +29,9 @@ New-Item -ItemType Directory -Force $dst | Out-Null
 Copy-Item "$env:LOCALAPPDATA\ScreenTranslator\models\*" $dst -Force
 
 # 4. Include the OCR language-pack helper and the end-user README.
+#    README.txt is tracked at packaging/README.txt (edit it there, not in dist/).
 Copy-Item scripts/install-ocr-language.ps1 dist/ScreenTranslator -Force
-# (README.txt is authored directly in dist/ScreenTranslator)
+Copy-Item packaging/README.txt dist/ScreenTranslator -Force
 ```
 
 ## Model variant vs. size

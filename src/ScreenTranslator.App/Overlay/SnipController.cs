@@ -67,7 +67,10 @@ internal sealed class SnipController
     {
         if (_active)
         {
-            Log("Snip already active — ignoring trigger.");
+            // A "dead" hotkey press (icon hidden, user unsure it's running) should
+            // visibly resurface the in-progress overlay rather than doing nothing.
+            Log("Snip already active — resurfacing existing overlay(s).");
+            ResurfaceOverlays();
             return;
         }
         _active = true;
@@ -109,6 +112,20 @@ internal sealed class SnipController
 
         if (autoTest)
             ScheduleAutoTest(monitors, explicitRegion);
+    }
+
+    /// <summary>
+    /// Brings the already-open overlays back to the foreground (no second capture)
+    /// so a re-trigger while a snip is active is not a silent no-op.
+    /// </summary>
+    private void ResurfaceOverlays()
+    {
+        if (_overlays.Count == 0) return;
+        foreach (var o in _overlays)
+        {
+            try { o.Activate(); } catch { /* ignore */ }
+        }
+        FocusOverlayUnderCursor(MonitorInfo.EnumerateAll());
     }
 
     private void FocusOverlayUnderCursor(IReadOnlyList<MonitorInfo> monitors)
@@ -272,6 +289,7 @@ internal sealed class SnipController
     {
         string line = $"[{DateTime.Now:HH:mm:ss.fff}] {message}";
         Debug.WriteLine(line);
-        Console.WriteLine(line);
+        try { Console.WriteLine(line); } catch { /* no console attached */ }
+        Logging.AppLog.Write(line);
     }
 }

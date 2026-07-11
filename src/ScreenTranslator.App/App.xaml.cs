@@ -1,12 +1,16 @@
 using System;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using H.NotifyIcon;
 using ScreenTranslator.App.Hotkeys;
+using ScreenTranslator.App.Logging;
 using ScreenTranslator.App.Ocr;
 using ScreenTranslator.App.Overlay;
 using ScreenTranslator.App.Pipeline;
@@ -29,6 +33,13 @@ public partial class App : Application
     private TaskbarIcon? _tray;
     private Settings.SettingsWindow? _settingsWindow;
 
+    // Single-instance guard. Held for the process lifetime so a second launch can
+    // detect the running copy instead of failing silently (dead hotkey, extra
+    // ~500MB model copy). Session-local namespace is fine — one per user session.
+    private const string SingleInstanceName = "ScreenTranslator.SingleInstance";
+    private Mutex? _singleInstanceMutex;
+    private bool _ownsSingleInstance;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -36,7 +47,34 @@ public partial class App : Application
         // Diagnostics carry Chinese OCR text; keep console/redirected logs UTF-8.
         try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { /* no console attached */ }
 
+        // File logging + global exception surfacing come first: a WinExe has no
+        // console, so without these an early failure is completely invisible.
+        AppLog.Initialize();
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandledException;
+        TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+
+        // Single-instance enforcement BEFORE any heavy init (config, OCR, model,
+        // tray, hotkey). A second launch must not load the model or steal state.
+        if (!TryAcquireSingleInstance())
+        {
+            Log("Another instance is running; exiting.");
+            MessageBox.Show(
+                "ScreenTranslator is already running.\n\n" +
+                "It lives in the system tray. Click the ^ (hidden icons) arrow near the " +
+                "clock to find the blue T icon, then press your snip shortcut to use it.",
+                "ScreenTranslator is already running",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            Shutdown();
+            return;
+        }
+
+        Version? version = GetType().Assembly.GetName().Version;
+        Log($"ScreenTranslator starting — version {version}, args: [{string.Join(" ", e.Args)}]");
+        Log("Single-instance lock acquired.");
+
         _config = AppConfig.LoadOrDefault();
+        Log($"Model directory resolved: {_config.ResolveModelDirectory()}");
 
         Action<string, string> notify = (title, message) =>
             Dispatcher.Invoke(() => ShowBalloon(title, message));
@@ -53,6 +91,14 @@ public partial class App : Application
 
         BuildTrayIcon();
 
+        // Startup visibility: Windows 11 hides new tray icons in the overflow
+        // chevron, so users think the app never launched. One balloon per launch
+        // tells them it's running and how to reach it, using the real hotkey.
+        string hotkeyDisplay = Settings.HotkeyCaptureBox.ToDisplay(_config.Hotkey);
+        ShowBalloon("ScreenTranslator is running",
+            $"Press {hotkeyDisplay} to snip. Right-click the tray icon for Settings " +
+            "(click ^ near the clock if the icon is hidden).");
+
         _hotkeys = new HotkeyManager();
         _hotkeys.Triggered += () => _snip!.BeginSnip(autoTest: false);
         if (!_hotkeys.TryRegister(_config.Hotkey, out string error))
@@ -60,6 +106,13 @@ public partial class App : Application
             Log($"Hotkey registration failed: {error}");
             ShowBalloon("Hotkey unavailable",
                 $"Could not register '{_config.Hotkey}'. Use the tray menu to snip. ({error})");
+            MessageBox.Show(
+                $"The shortcut '{hotkeyDisplay}' could not be registered — usually another " +
+                "app (or another ScreenTranslator instance) already owns it.\n\n" +
+                "ScreenTranslator is still running in the tray; you can snip from the tray menu " +
+                "or pick a different shortcut via the tray icon → Settings…",
+                "ScreenTranslator — shortcut unavailable",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         else
         {
@@ -291,13 +344,66 @@ public partial class App : Application
         _hotkeys?.Dispose();
         _translator?.Dispose();
         _tray?.Dispose();
+        if (_singleInstanceMutex is not null)
+        {
+            try { if (_ownsSingleInstance) _singleInstanceMutex.ReleaseMutex(); } catch { /* ignore */ }
+            _singleInstanceMutex.Dispose();
+            _singleInstanceMutex = null;
+        }
         base.OnExit(e);
+    }
+
+    /// <summary>
+    /// Acquires the process-wide single-instance mutex without blocking. Returns
+    /// true when this process now owns it (including the abandoned-mutex case,
+    /// where a previous owner exited without releasing).
+    /// </summary>
+    private bool TryAcquireSingleInstance()
+    {
+        _singleInstanceMutex = new Mutex(initiallyOwned: false, SingleInstanceName);
+        try
+        {
+            _ownsSingleInstance = _singleInstanceMutex.WaitOne(TimeSpan.Zero, exitContext: false);
+        }
+        catch (AbandonedMutexException)
+        {
+            // Prior owner crashed without releasing; ownership transfers to us.
+            _ownsSingleInstance = true;
+        }
+        return _ownsSingleInstance;
+    }
+
+    private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    {
+        Log($"[fatal] DispatcherUnhandledException: {e.Exception}");
+        try
+        {
+            MessageBox.Show(
+                $"ScreenTranslator hit an unexpected error: {e.Exception.Message}. " +
+                $"Details: {AppLog.LogPath}",
+                "ScreenTranslator error", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        catch { /* never let error handling throw */ }
+        // Keep the tray app alive; a single failed snip shouldn't kill the process.
+        e.Handled = true;
+    }
+
+    private void OnDomainUnhandledException(object sender, UnhandledExceptionEventArgs e)
+    {
+        Log($"[fatal] AppDomain.UnhandledException (terminating={e.IsTerminating}): {e.ExceptionObject}");
+    }
+
+    private void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
+    {
+        Log($"[fatal] UnobservedTaskException: {e.Exception}");
+        e.SetObserved();
     }
 
     private static void Log(string message)
     {
         string line = $"[{DateTime.Now:HH:mm:ss.fff}] {message}";
         Debug.WriteLine(line);
-        Console.WriteLine(line);
+        try { Console.WriteLine(line); } catch { /* no console attached */ }
+        AppLog.Write(line);
     }
 }
