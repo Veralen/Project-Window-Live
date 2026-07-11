@@ -110,3 +110,44 @@ translation separately (grammar breaks across lines).
 - ONNX `InferenceSession` is expensive: create once at startup (background
   init), reuse. `TranslateAsync` calls are serialized by the engine itself
   (single-flight lock) — callers don't need to know.
+
+## Translation execution provider (CPU default, optional DirectML GPU)
+
+Translation runs on ONNX Runtime. The package is
+`Microsoft.ML.OnnxRuntime.DirectML` (1.24.x) — it ships the CPU EP too, so the
+default path is unchanged and it merely *adds* an opt-in DirectML (DX12 GPU) EP.
+
+- **CPU is the default and is sacred.** `AppConfig.ExecutionProvider = "cpu"`
+  (the default) builds `SessionOptions` exactly as before (ORT_ENABLE_ALL,
+  IntraOp = ProcessorCount/2, InterOp = 1). opus-mt on CPU — the shipping engine —
+  is byte-for-byte unaffected. On a typical CPU opus-mt translates a short block
+  in well under a second, so most users never need the GPU.
+- **DirectML is opt-in via config.** `ExecutionProvider = "directml"` (+ optional
+  `GpuDeviceId`) runs on any DX12 adapter (NVIDIA/AMD/Intel) with zero install.
+  Chosen over CUDA specifically because it's driver-only. `Engine` (`"opus"` /
+  `"nllb"`) is also config now so the GPU box can switch to NLLB without a rebuild.
+- **One construction point.** `OnnxSessionFactory` is the *only* place
+  `SessionOptions` are built and encoder/decoder sessions created. DirectML
+  requires (per the ORT DirectML EP docs) `EnableMemoryPattern = false` and
+  `ExecutionMode = ORT_SEQUENTIAL`; those are applied only on the DML path, then
+  `AppendExecutionProvider_DML(deviceId)`.
+- **fp32 for GPU, never int8.** int8 dynamic quantization is CPU-targeted; it does
+  not benefit DirectML and — on at least some drivers — int8 + DML triggers a
+  *native access violation that no managed try/catch can catch* (it kills the
+  process). So the factory refuses int8 + DML and uses CPU instead, and NLLB
+  prefers its fp32 weights whenever the provider is DirectML
+  (`download-model-nllb.ps1 -Variant fp32`, a ~2.4 GB download).
+- **Graceful fallback.** If DirectML *initialization* throws (no DX12 device,
+  driver/model unsupported), the factory logs the reason and transparently
+  rebuilds CPU sessions — the engine always ends up working. Note this only
+  catches *managed* exceptions; the int8-guard above exists precisely because the
+  int8+DML failure mode is an uncatchable native crash. Engines expose
+  `ActiveProvider` (the provider actually used) after init.
+- **Measured on the Arc 140V dev iGPU (2026-07):** DirectML *underdelivered
+  badly here* — opus-mt fp32 on DML produced garbage output and ~30 s/input (vs
+  <1 s on CPU); NLLB int8 on DML hard-crashed (now guarded → CPU). This looks
+  specific to this Arc iGPU/driver + the KV-cache merged-decoder subgraph; it is
+  benchmark data, not a code defect (the DML path loads and the fallbacks are
+  sound). The RTX 3070 target should be re-benchmarked with fp32 weights.
+- **CUDA EP is a possible later optimization** for the NVIDIA target if DirectML
+  underdelivers on the 3070 (it needs a CUDA/cuDNN install, hence not the default).

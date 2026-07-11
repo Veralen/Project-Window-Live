@@ -8,7 +8,14 @@
     <ProjectReference Include="..\ScreenTranslator.Core\ScreenTranslator.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.24.4" />
+    <!--
+      DirectML build of ONNX Runtime. It bundles the CPU execution provider too, so
+      the default CPU path is byte-for-byte unchanged; it ADDS an optional DirectML
+      (DX12 GPU) provider selectable via AppConfig.ExecutionProvider = "directml".
+      Must NOT coexist with the plain Microsoft.ML.OnnxRuntime package (duplicate
+      onnxruntime.dll native conflict) — this replaces it.
+    -->
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
     <PackageReference Include="Tokenizers.DotNet" Version="1.4.1" />
     <PackageReference Include="Tokenizers.DotNet.runtime.win-x64" Version="1.4.1" />
   </ItemGroup>

@@ -36,7 +36,13 @@ public sealed class NllbOnnxTranslator : ITranslator
 
     private readonly string _modelDirectory;
     private readonly int _numBeams;
+    private readonly string _executionProvider;
+    private readonly int _gpuDeviceId;
+    private readonly Action<string>? _log;
     private readonly SemaphoreSlim _gate = new(1, 1);
+
+    /// <summary>The execution provider actually in use after init ("cpu" or "directml").</summary>
+    public string ActiveProvider { get; private set; } = OnnxSessionFactory.Cpu;
 
     private InferenceSession? _encoder;
     private InferenceSession? _decoder;
@@ -50,11 +56,25 @@ public sealed class NllbOnnxTranslator : ITranslator
 
     public bool IsReady { get; private set; }
 
-    public NllbOnnxTranslator(string modelDirectory, int numBeams = 4)
+    /// <param name="executionProvider">
+    /// <c>"cpu"</c> (default) or <c>"directml"</c>. On DirectML the engine prefers the
+    /// fp32 weights (int8 dynamic quantization does not benefit DML and can be slower /
+    /// lower quality); on CPU it prefers int8. Whichever is preferred, it falls back to
+    /// whatever files exist. Unknown values fall back to CPU, and a DirectML init
+    /// failure falls back to CPU automatically.
+    /// </param>
+    /// <param name="gpuDeviceId">DirectML adapter index (default 0). Ignored on CPU.</param>
+    /// <param name="log">Optional sink for provider / file-selection / fallback log lines.</param>
+    public NllbOnnxTranslator(string modelDirectory, int numBeams = 4,
+        string executionProvider = "cpu", int gpuDeviceId = 0, Action<string>? log = null)
     {
         _modelDirectory = modelDirectory ?? throw new ArgumentNullException(nameof(modelDirectory));
         if (numBeams < 1) throw new ArgumentOutOfRangeException(nameof(numBeams), "Beam width must be >= 1.");
         _numBeams = numBeams;
+        _executionProvider = executionProvider ?? OnnxSessionFactory.Cpu;
+        _gpuDeviceId = gpuDeviceId;
+        _log = log;
+        ActiveProvider = OnnxSessionFactory.NormalizeProvider(_executionProvider);
     }
 
     public async Task InitializeAsync(CancellationToken ct = default)
@@ -64,25 +84,28 @@ public sealed class NllbOnnxTranslator : ITranslator
             throw new FileNotFoundException(
                 $"NLLB model directory not found: '{_modelDirectory}'. {DownloadHint}");
 
-        string encoderPath = RequireFile("encoder_model_quantized.onnx");
-        string decoderPath = RequireFile("decoder_model_merged_quantized.onnx");
+        // DirectML wants fp32 weights; CPU keeps the int8 files (current behavior).
+        bool preferFp32 = OnnxSessionFactory.NormalizeProvider(_executionProvider) == OnnxSessionFactory.DirectMl;
+        string encoderPath = ResolveWeightFile(
+            "encoder_model.onnx", "encoder_model_quantized.onnx", preferFp32);
+        string decoderPath = ResolveWeightFile(
+            "decoder_model_merged.onnx", "decoder_model_merged_quantized.onnx", preferFp32);
         string tokenizerPath = RequireFile("tokenizer.json");
         LoadConfig();
 
         await Task.Run(() =>
         {
-            var options = new SessionOptions
-            {
-                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
-            };
-            options.IntraOpNumThreads = Math.Max(1, Environment.ProcessorCount / 2);
-            options.InterOpNumThreads = 1;
-
-            _encoder = new InferenceSession(encoderPath, options);
-            _decoder = new InferenceSession(decoderPath, options);
+            bool quantized = encoderPath.Contains("quantized", StringComparison.OrdinalIgnoreCase);
+            (_encoder, _decoder, string provider) = OnnxSessionFactory.CreateEncoderDecoder(
+                encoderPath, decoderPath, _executionProvider, _gpuDeviceId, quantized, _log);
+            ActiveProvider = provider;
             _tokenizer = new Tokenizer(vocabPath: tokenizerPath);
             _engine = new Seq2SeqOnnxEngine(_encoder, _decoder, _numLayers, _numHeads, _headDim);
         }, ct).ConfigureAwait(false);
+
+        _log?.Invoke(
+            $"[nllb] Loaded {Path.GetFileName(encoderPath)} + {Path.GetFileName(decoderPath)} " +
+            $"on {ActiveProvider} execution provider.");
 
         IsReady = true;
     }
@@ -216,6 +239,29 @@ public sealed class NllbOnnxTranslator : ITranslator
         if (!File.Exists(path))
             throw new FileNotFoundException($"Required NLLB model file '{name}' missing from '{_modelDirectory}'. {DownloadHint}", path);
         return path;
+    }
+
+    /// <summary>
+    /// Picks the fp32 vs int8 weight file. <paramref name="preferFp32"/> (DirectML)
+    /// tries <paramref name="fp32Name"/> first; otherwise (CPU) <paramref name="int8Name"/>
+    /// first. Falls back to whichever exists, and throws with the download hint if
+    /// neither is present.
+    /// </summary>
+    private string ResolveWeightFile(string fp32Name, string int8Name, bool preferFp32)
+    {
+        string first = preferFp32 ? fp32Name : int8Name;
+        string second = preferFp32 ? int8Name : fp32Name;
+        string firstPath = Path.Combine(_modelDirectory, first);
+        if (File.Exists(firstPath)) return firstPath;
+        string secondPath = Path.Combine(_modelDirectory, second);
+        if (File.Exists(secondPath))
+        {
+            if (preferFp32)
+                _log?.Invoke($"[nllb] fp32 '{first}' not found; using '{second}'. GPU runs want the fp32 variant (download-model-nllb.ps1 -Variant fp32).");
+            return secondPath;
+        }
+        throw new FileNotFoundException(
+            $"NLLB weights not found in '{_modelDirectory}' (looked for '{fp32Name}' / '{int8Name}'). {DownloadHint}");
     }
 
     public void Dispose()

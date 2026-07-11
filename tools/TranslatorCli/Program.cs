@@ -9,9 +9,10 @@
 // Flags: --model-dir <path>, --engine opus|nllb (default opus; nllb is BENCHMARK
 // ONLY and reads from the sibling models-nllb dir), --beams <n> (override beam
 // width; opus default is min(config,4)), --quantized/--int8 (force int8, opus only),
-// --fp32 (force fp32, the opus default). Remaining args are translated in sequence.
-// Prints each translation with per-call timing. Exits non-zero with an actionable
-// message when the model is missing.
+// --fp32 (force fp32, the opus default), --ep cpu|directml (execution provider,
+// default cpu), --gpu (shorthand for --ep directml), --device <n> (DirectML adapter
+// index). Remaining args are translated in sequence. Prints each translation with
+// per-call timing. Exits non-zero with an actionable message when the model is missing.
 using System.Diagnostics;
 using ScreenTranslator.Core.Config;
 using ScreenTranslator.Core.Translation;
@@ -21,6 +22,8 @@ string? modelDir = null;
 bool preferQuantized = false; // default matches the engine (fp32)
 string engine = "opus";       // "opus" (default, app engine) or "nllb" (benchmark only)
 int? beamWidth = null;        // null -> engine default (min(config, 4))
+string provider = "cpu";      // "cpu" (default) or "directml"
+int deviceId = 0;             // DirectML adapter index
 var texts = new List<string>();
 
 for (int i = 0; i < args.Length; i++)
@@ -42,6 +45,15 @@ for (int i = 0; i < args.Length; i++)
             break;
         case "--fp32":
             preferQuantized = false;
+            break;
+        case "--ep" when i + 1 < args.Length:
+            provider = args[++i].ToLowerInvariant();
+            break;
+        case "--gpu":
+            provider = "directml";
+            break;
+        case "--device" when i + 1 < args.Length:
+            deviceId = int.Parse(args[++i]);
             break;
         default:
             texts.Add(args[i]);
@@ -77,15 +89,21 @@ if (texts.Count == 0)
     Console.WriteLine("(no input given — running the built-in sample set)\n");
 }
 
-Console.WriteLine($"Engine: {(engine == "nllb" ? "NLLB-200-distilled-600M (int8, BENCHMARK ONLY)" : "opus-mt-zh-en")}");
+Console.WriteLine($"Engine: {(engine == "nllb" ? "NLLB-200-distilled-600M (BENCHMARK ONLY)" : "opus-mt-zh-en")}");
 Console.WriteLine($"Model directory: {modelDir}");
 if (engine == "opus")
     Console.WriteLine($"Weights: {(preferQuantized ? "quantized (int8)" : "full-precision (fp32)")}");
-Console.WriteLine($"Beams: {(beamWidth?.ToString() ?? "engine default")}\n");
+Console.WriteLine($"Beams: {(beamWidth?.ToString() ?? "engine default")}");
+Console.WriteLine($"Requested provider: {provider}{(provider == "directml" ? $" (device {deviceId})" : "")}");
+
+// Provider / file-selection / fallback lines are surfaced to stderr as they happen.
+void Log(string line) => Console.Error.WriteLine(line);
 
 using ITranslator translator = engine == "nllb"
-    ? new NllbOnnxTranslator(modelDir, numBeams: beamWidth ?? 4)
-    : new LocalOnnxTranslator(modelDir, preferQuantized: preferQuantized, beamWidth: beamWidth);
+    ? (ITranslator)new NllbOnnxTranslator(modelDir, numBeams: beamWidth ?? 4,
+        executionProvider: provider, gpuDeviceId: deviceId, log: Log)
+    : new LocalOnnxTranslator(modelDir, preferQuantized: preferQuantized, beamWidth: beamWidth,
+        executionProvider: provider, gpuDeviceId: deviceId, log: Log);
 
 var sw = Stopwatch.StartNew();
 try
@@ -98,6 +116,15 @@ catch (FileNotFoundException ex)
     return 2;
 }
 sw.Stop();
+
+string activeProvider = translator switch
+{
+    LocalOnnxTranslator o => o.ActiveProvider,
+    NllbOnnxTranslator n => n.ActiveProvider,
+    _ => provider,
+};
+Console.WriteLine($"Active provider: {activeProvider}" +
+    (activeProvider != provider ? $"  (requested '{provider}', fell back)" : ""));
 Console.WriteLine($"Init: {sw.ElapsedMilliseconds} ms\n");
 
 foreach (var text in texts)

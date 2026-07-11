@@ -25,6 +25,25 @@ public sealed class AppConfig
     /// <summary>Directory containing the translation model files. Relative paths resolve against %LOCALAPPDATA%\ScreenTranslator.</summary>
     public string ModelDirectory { get; set; } = "models";
 
+    /// <summary>
+    /// Translation engine: <c>"opus"</c> (default; opus-mt-zh-en, the shipping engine)
+    /// or <c>"nllb"</c> (NLLB-200-distilled-600M, higher quality but far heavier — only
+    /// interactive on a capable GPU). NLLB reads from a sibling <c>models-nllb</c> dir.
+    /// Unknown values fall back to <c>"opus"</c>.
+    /// </summary>
+    public string Engine { get; set; } = "opus";
+
+    /// <summary>
+    /// ONNX Runtime execution provider: <c>"cpu"</c> (default; the shipping behavior)
+    /// or <c>"directml"</c> to run translation on a DX12 GPU. DirectML is zero-install
+    /// on any DX12 adapter (NVIDIA/AMD/Intel). If DirectML fails to initialize the
+    /// engine automatically falls back to CPU. Unknown values fall back to <c>"cpu"</c>.
+    /// </summary>
+    public string ExecutionProvider { get; set; } = "cpu";
+
+    /// <summary>DirectML GPU adapter index (default 0). Ignored when ExecutionProvider is "cpu".</summary>
+    public int GpuDeviceId { get; set; } = 0;
+
     public static string DefaultPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "ScreenTranslator", "config.json");
@@ -58,6 +77,43 @@ public sealed class AppConfig
         path ??= DefaultPath;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, JsonSerializer.Serialize(this, JsonOptions));
+    }
+
+    /// <summary>
+    /// Normalizes <see cref="Engine"/> to a known value ("opus"/"nllb"), logging and
+    /// defaulting to "opus" on anything unrecognized. Never throws.
+    /// </summary>
+    public string ResolveEngine(Action<string>? log = null)
+    {
+        string e = (Engine ?? string.Empty).Trim().ToLowerInvariant();
+        if (e == "opus" || e == "nllb") return e;
+        log?.Invoke($"[config] Unknown Engine '{Engine}'; using 'opus'.");
+        return "opus";
+    }
+
+    /// <summary>
+    /// Normalizes <see cref="ExecutionProvider"/> to a known value ("cpu"/"directml"),
+    /// logging and defaulting to "cpu" on anything unrecognized. Never throws.
+    /// </summary>
+    public string ResolveExecutionProvider(Action<string>? log = null)
+    {
+        string p = (ExecutionProvider ?? string.Empty).Trim().ToLowerInvariant();
+        if (p == "cpu" || p == "directml") return p;
+        if (p == "dml" || p == "gpu") return "directml";
+        log?.Invoke($"[config] Unknown ExecutionProvider '{ExecutionProvider}'; using 'cpu'.");
+        return "cpu";
+    }
+
+    /// <summary>
+    /// Resolves the NLLB benchmark model directory (sibling <c>models-nllb</c> next to
+    /// the opus model dir), mirroring TranslatorCli's layout.
+    /// </summary>
+    public string ResolveNllbModelDirectory()
+    {
+        string opusDir = ResolveModelDirectory();
+        string? parent = Path.GetDirectoryName(
+            opusDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return Path.Combine(parent ?? opusDir, "models-nllb");
     }
 
     public string ResolveModelDirectory()

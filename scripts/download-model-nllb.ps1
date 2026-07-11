@@ -7,9 +7,16 @@
 
 .DESCRIPTION
     Model: facebook/nllb-200-distilled-600M, ONNX export published at Hugging Face
-    repo "Xenova/nllb-200-distilled-600M". ~600M-parameter M2M/NLLB seq2seq. The
-    quantized (int8) encoder + KV-cache-merged decoder are downloaded (the fp32
-    export is >2 GB and unnecessary for benchmarking).
+    repo "Xenova/nllb-200-distilled-600M". ~600M-parameter M2M/NLLB seq2seq.
+
+    -Variant selects which encoder + KV-cache-merged decoder weights to fetch:
+      int8  (default) — ~small download; CPU-targeted dynamic quantization. This is
+                        what the CPU benchmark path uses (current behavior).
+      fp32            — full-precision weights (~2.4 GB total). GPU (DirectML) runs
+                        want THIS: int8 dynamic quant does not benefit DirectML and
+                        can be slower / lower quality. Set ExecutionProvider=directml
+                        (config) or --ep directml (CLI) after downloading this.
+      both            — download both variants.
 
     Files are placed in %LOCALAPPDATA%\ScreenTranslator\models-nllb (kept separate
     from the opus-mt models directory), unless overridden with -Destination.
@@ -22,12 +29,20 @@
 .PARAMETER Destination
     Target directory. Defaults to %LOCALAPPDATA%\ScreenTranslator\models-nllb.
 
+.PARAMETER Variant
+    Which weights to download: int8 (default), fp32 (for GPU/DirectML), or both.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\download-model-nllb.ps1
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File scripts\download-model-nllb.ps1 -Variant fp32
 #>
 [CmdletBinding()]
 param(
-    [string]$Destination
+    [string]$Destination,
+    [ValidateSet('int8', 'fp32', 'both')]
+    [string]$Variant = 'int8'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,11 +65,17 @@ $CommonFiles = @(
     'special_tokens_map.json'
 )
 
-# int8 encoder + merged decoder only (fp32 is >2 GB; not needed for benchmarking).
+# Weight files by variant. int8 (CPU-targeted, default) and/or fp32 (GPU/DirectML).
 $Downloads = @()
 foreach ($f in $CommonFiles) { $Downloads += @{ Remote = $f; Local = $f } }
-$Downloads += @{ Remote = 'onnx/encoder_model_quantized.onnx';        Local = 'encoder_model_quantized.onnx' }
-$Downloads += @{ Remote = 'onnx/decoder_model_merged_quantized.onnx'; Local = 'decoder_model_merged_quantized.onnx' }
+if ($Variant -eq 'int8' -or $Variant -eq 'both') {
+    $Downloads += @{ Remote = 'onnx/encoder_model_quantized.onnx';        Local = 'encoder_model_quantized.onnx' }
+    $Downloads += @{ Remote = 'onnx/decoder_model_merged_quantized.onnx'; Local = 'decoder_model_merged_quantized.onnx' }
+}
+if ($Variant -eq 'fp32' -or $Variant -eq 'both') {
+    $Downloads += @{ Remote = 'onnx/encoder_model.onnx';        Local = 'encoder_model.onnx' }
+    $Downloads += @{ Remote = 'onnx/decoder_model_merged.onnx'; Local = 'decoder_model_merged.onnx' }
+}
 
 function Get-RemoteLength {
     param([string]$Url)
@@ -77,6 +98,7 @@ function Format-Size {
 Write-Host ''
 Write-Host "ScreenTranslator NLLB benchmark-model downloader" -ForegroundColor Cyan
 Write-Host "  Repo:        $Repo"
+Write-Host "  Variant:     $Variant$(if ($Variant -ne 'int8') { '  (fp32 is ~2.4 GB; GPU/DirectML wants fp32)' })"
 Write-Host "  Destination: $Destination"
 Write-Host ''
 

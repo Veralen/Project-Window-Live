@@ -30,7 +30,13 @@ public sealed class LocalOnnxTranslator : ITranslator
     private readonly string _modelDirectory;
     private readonly bool _preferQuantized;
     private readonly int? _beamWidthOverride;
+    private readonly string _executionProvider;
+    private readonly int _gpuDeviceId;
+    private readonly Action<string>? _log;
     private readonly SemaphoreSlim _gate = new(1, 1);
+
+    /// <summary>The execution provider actually in use after init ("cpu" or "directml"), or the requested one before.</summary>
+    public string ActiveProvider { get; private set; } = OnnxSessionFactory.Cpu;
 
     private InferenceSession? _encoder;
     private InferenceSession? _decoder;
@@ -79,13 +85,27 @@ public sealed class LocalOnnxTranslator : ITranslator
     /// uses <c>min(generation_config.num_beams, 4)</c>. Pass 1 for greedy decoding,
     /// or a larger value to trade latency for quality.
     /// </param>
-    public LocalOnnxTranslator(string modelDirectory, bool preferQuantized = false, int? beamWidth = null)
+    /// <param name="executionProvider">
+    /// ONNX Runtime execution provider: <c>"cpu"</c> (default — the shipping behavior,
+    /// byte-for-byte unchanged) or <c>"directml"</c> to run on a DX12 GPU. Unknown
+    /// values fall back to CPU. If DirectML initialization fails at runtime the engine
+    /// automatically falls back to CPU (see <see cref="OnnxSessionFactory"/>); check
+    /// <see cref="ActiveProvider"/> after <see cref="InitializeAsync"/> for the result.
+    /// </param>
+    /// <param name="gpuDeviceId">DirectML adapter index (default 0). Ignored on CPU.</param>
+    /// <param name="log">Optional sink for provider-selection / fallback log lines.</param>
+    public LocalOnnxTranslator(string modelDirectory, bool preferQuantized = false, int? beamWidth = null,
+        string executionProvider = "cpu", int gpuDeviceId = 0, Action<string>? log = null)
     {
         _modelDirectory = modelDirectory ?? throw new ArgumentNullException(nameof(modelDirectory));
         _preferQuantized = preferQuantized;
         if (beamWidth is int bw && bw < 1)
             throw new ArgumentOutOfRangeException(nameof(beamWidth), "Beam width must be >= 1.");
         _beamWidthOverride = beamWidth;
+        _executionProvider = executionProvider ?? OnnxSessionFactory.Cpu;
+        _gpuDeviceId = gpuDeviceId;
+        _log = log;
+        ActiveProvider = OnnxSessionFactory.NormalizeProvider(_executionProvider);
     }
 
     public async Task InitializeAsync(CancellationToken ct = default)
@@ -104,16 +124,10 @@ public sealed class LocalOnnxTranslator : ITranslator
         // Building sessions + tokenizer is CPU/IO heavy; keep it off the caller's thread.
         await Task.Run(() =>
         {
-            var options = new SessionOptions
-            {
-                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
-            };
-            // Deterministic, snip-friendly CPU latency: bound thread pools.
-            options.IntraOpNumThreads = Math.Max(1, Environment.ProcessorCount / 2);
-            options.InterOpNumThreads = 1;
-
-            _encoder = new InferenceSession(encoderPath, options);
-            _decoder = new InferenceSession(decoderPath, options);
+            bool quantized = encoderPath.Contains("quantized", StringComparison.OrdinalIgnoreCase);
+            (_encoder, _decoder, string provider) = OnnxSessionFactory.CreateEncoderDecoder(
+                encoderPath, decoderPath, _executionProvider, _gpuDeviceId, quantized, _log);
+            ActiveProvider = provider;
             _tokenizer = new Tokenizer(vocabPath: SanitizeTokenizer(tokenizerPath));
             _engine = new Seq2SeqOnnxEngine(_encoder, _decoder, _numLayers, _numHeads, _headDim);
         }, ct).ConfigureAwait(false);
