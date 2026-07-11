@@ -280,6 +280,30 @@ internal sealed class OverlayWindow : Window
         _resultsShown = true;
     }
 
+    /// <summary>
+    /// Renders the current overlay (frozen capture + dim + selection + chips) to a
+    /// PNG at full physical resolution. Used by the --save-shot test/demo path so
+    /// results can be captured without a screenshot (the overlay is topmost and
+    /// would otherwise be masked). Must be called on the UI thread after layout.
+    /// </summary>
+    public void SaveToPng(string path)
+    {
+        _root.UpdateLayout();
+        double dpi = _monitor.Dpi;
+        int pxW = (int)Math.Round(_root.ActualWidth * dpi / 96.0);
+        int pxH = (int)Math.Round(_root.ActualHeight * dpi / 96.0);
+        if (pxW <= 0 || pxH <= 0) return;
+
+        var rtb = new RenderTargetBitmap(pxW, pxH, dpi, dpi, PixelFormats.Pbgra32);
+        rtb.Render(_root);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(rtb));
+        var dir = System.IO.Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir)) System.IO.Directory.CreateDirectory(dir);
+        using var fs = System.IO.File.Create(path);
+        encoder.Save(fs);
+    }
+
     /// <summary>Shows a "No text detected" chip at the selection.</summary>
     public void ShowNoTextChip()
     {

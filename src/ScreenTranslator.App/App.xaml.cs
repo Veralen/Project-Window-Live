@@ -65,12 +65,39 @@ public partial class App : Application
         // Debug affordances.
         bool snipNow = e.Args.Any(a => string.Equals(a, "--snip", StringComparison.OrdinalIgnoreCase));
         bool autoTest = e.Args.Any(a => string.Equals(a, "--auto-test", StringComparison.OrdinalIgnoreCase));
+        // --snip-rect L,T,W,H : deterministically snip an explicit virtual-screen
+        // physical-px rectangle (implies --snip --auto-test). For testing/demos.
+        Core.Geometry.PixelRect? explicitRegion = ParseSnipRect(e.Args);
+        if (explicitRegion is not null)
+        {
+            snipNow = true;
+            autoTest = true;
+        }
+        _snip.SaveShotPath = GetArgValue(e.Args, "--save-shot");
         if (snipNow)
         {
-            Log($"--snip requested (auto-test={autoTest}).");
-            Dispatcher.BeginInvoke(new Action(() => _snip!.BeginSnip(autoTest)),
+            Log($"--snip requested (auto-test={autoTest}, rect={explicitRegion}, saveShot={_snip.SaveShotPath}).");
+            Dispatcher.BeginInvoke(new Action(() => _snip!.BeginSnip(autoTest, explicitRegion)),
                 System.Windows.Threading.DispatcherPriority.ApplicationIdle);
         }
+    }
+
+    private static string? GetArgValue(string[] args, string name)
+    {
+        int i = Array.FindIndex(args, a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase));
+        return (i >= 0 && i + 1 < args.Length) ? args[i + 1] : null;
+    }
+
+    private static Core.Geometry.PixelRect? ParseSnipRect(string[] args)
+    {
+        int i = Array.FindIndex(args, a => string.Equals(a, "--snip-rect", StringComparison.OrdinalIgnoreCase));
+        if (i < 0 || i + 1 >= args.Length) return null;
+        string[] p = args[i + 1].Split(',', StringSplitOptions.TrimEntries);
+        if (p.Length != 4) return null;
+        if (double.TryParse(p[0], out double l) && double.TryParse(p[1], out double t) &&
+            double.TryParse(p[2], out double w) && double.TryParse(p[3], out double h))
+            return new Core.Geometry.PixelRect(l, t, w, h);
+        return null;
     }
 
     private static async System.Threading.Tasks.Task InitializeTranslatorAsync(ITranslator translator)

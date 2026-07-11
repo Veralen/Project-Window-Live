@@ -53,8 +53,17 @@ internal sealed class SnipController
 
     public bool IsActive => _active;
 
+    /// <summary>When set, the overlay result is saved to this PNG path after rendering (test/demo).</summary>
+    public string? SaveShotPath { get; set; }
+
     /// <summary>Runs the capture-first snip flow. Must be called on the UI thread.</summary>
-    public void BeginSnip(bool autoTest = false)
+    /// <param name="autoTest">Auto-select a region and auto-close (headless smoke test).</param>
+    /// <param name="explicitRegion">
+    /// When set (with autoTest), snip exactly this virtual-screen physical-px
+    /// rectangle instead of the hardcoded centre region. Used by --snip-rect to
+    /// drive a deterministic capture over known on-screen text.
+    /// </param>
+    public void BeginSnip(bool autoTest = false, PixelRect? explicitRegion = null)
     {
         if (_active)
         {
@@ -99,7 +108,7 @@ internal sealed class SnipController
         FocusOverlayUnderCursor(monitors);
 
         if (autoTest)
-            ScheduleAutoTest(monitors);
+            ScheduleAutoTest(monitors, explicitRegion);
     }
 
     private void FocusOverlayUnderCursor(IReadOnlyList<MonitorInfo> monitors)
@@ -116,27 +125,32 @@ internal sealed class SnipController
         target.Focus();
     }
 
-    private void ScheduleAutoTest(IReadOnlyList<MonitorInfo> monitors)
+    private void ScheduleAutoTest(IReadOnlyList<MonitorInfo> monitors, PixelRect? explicitRegion)
     {
         MonitorInfo primary = monitors[0];
         foreach (var m in monitors) if (m.IsPrimary) { primary = m; break; }
+
+        // Default: 600x200 physical region centred on the primary monitor.
+        PixelRect region = explicitRegion ?? new PixelRect(
+            primary.Bounds.X + (primary.Bounds.Width - 600) / 2,
+            primary.Bounds.Y + (primary.Bounds.Height - 200) / 2,
+            600, 200);
+
+        // Pick the overlay whose monitor contains the region's centre.
+        MonitorInfo target = MonitorInfo.ForPoint(monitors, region.Center);
 
         var startTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         startTimer.Tick += (_, _) =>
         {
             startTimer.Stop();
-            // Hardcoded 600x200 physical region centred on the primary monitor.
-            double w = 600, h = 200;
-            double x = primary.Bounds.X + (primary.Bounds.Width - w) / 2;
-            double y = primary.Bounds.Y + (primary.Bounds.Height - h) / 2;
-            var region = new PixelRect(x, y, w, h);
-            Log($"[auto-test] Auto-selecting region ({x},{y},{w},{h}) on primary monitor.");
+            Log($"[auto-test] Auto-selecting region ({region.X},{region.Y},{region.Width},{region.Height}) on monitor {target.Handle}.");
             foreach (var o in _overlays)
-                if (o.Monitor.Handle == primary.Handle) { o.SelectProgrammatically(region); break; }
+                if (o.Monitor.Handle == target.Handle) { o.SelectProgrammatically(region); break; }
         };
         startTimer.Start();
 
-        _autoCloseTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+        // Longer window when snipping real content so results stay visible for a screenshot.
+        _autoCloseTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(explicitRegion is null ? 5 : 12) };
         _autoCloseTimer.Tick += (_, _) =>
         {
             _autoCloseTimer!.Stop();
@@ -219,6 +233,20 @@ internal sealed class SnipController
                 overlay.ShowNoTextChip();
             else
                 overlay.RenderLabels(result.placed);
+
+            if (SaveShotPath is not null)
+            {
+                // Let the chips lay out, then snapshot the overlay to PNG.
+                await overlay.Dispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        overlay.SaveToPng(SaveShotPath);
+                        Log($"[save-shot] Wrote overlay PNG: {SaveShotPath}");
+                    }
+                    catch (Exception ex) { Log($"[save-shot] Failed: {ex.Message}"); }
+                }, DispatcherPriority.Loaded);
+            }
         }
         catch (Exception ex)
         {
