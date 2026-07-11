@@ -16,7 +16,23 @@
       onnxruntime.dll native conflict) — this replaces it.
     -->
     <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
+    <!--
+      The DirectML.dll REDISTRIBUTABLE. Without it the OS loader falls back to the
+      inbox System32\DirectML.dll (v1.0, 2020 on Win10), which the ORT 1.24 DML EP
+      rejects at session creation with "feature level is not supported" — so the GPU
+      path silently ran on CPU. The package's own .targets only copies the DLL when
+      PlatformTarget is x64 (never set in SDK-style AnyCPU projects) and doesn't flow
+      through ProjectReferences, hence the explicit copy item below;
+      None+CopyToOutputDirectory DOES propagate to the App/CLI outputs and publish.
+    -->
+    <PackageReference Include="Microsoft.AI.DirectML" Version="1.15.4" GeneratePathProperty="true" />
     <PackageReference Include="Tokenizers.DotNet" Version="1.4.1" />
     <PackageReference Include="Tokenizers.DotNet.runtime.win-x64" Version="1.4.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="$(PkgMicrosoft_AI_DirectML)\bin\x64-win\DirectML.dll"
+          Link="DirectML.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
   </ItemGroup>
 </Project>

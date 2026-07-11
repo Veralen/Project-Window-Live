@@ -143,11 +143,28 @@ default path is unchanged and it merely *adds* an opt-in DirectML (DX12 GPU) EP.
   catches *managed* exceptions; the int8-guard above exists precisely because the
   int8+DML failure mode is an uncatchable native crash. Engines expose
   `ActiveProvider` (the provider actually used) after init.
-- **Measured on the Arc 140V dev iGPU (2026-07):** DirectML *underdelivered
-  badly here* — opus-mt fp32 on DML produced garbage output and ~30 s/input (vs
-  <1 s on CPU); NLLB int8 on DML hard-crashed (now guarded → CPU). This looks
-  specific to this Arc iGPU/driver + the KV-cache merged-decoder subgraph; it is
-  benchmark data, not a code defect (the DML path loads and the fallbacks are
-  sound). The RTX 3070 target should be re-benchmarked with fp32 weights.
-- **CUDA EP is a possible later optimization** for the NVIDIA target if DirectML
-  underdelivers on the 3070 (it needs a CUDA/cuDNN install, hence not the default).
+- **DirectML.dll must ship beside the exe.** Microsoft.AI.DirectML's own .targets
+  only copies the redistributable when `PlatformTarget` is exactly `x64` — never
+  true in our SDK-style AnyCPU projects — and doesn't flow through
+  ProjectReferences, so every output silently loaded the *inbox*
+  `System32\DirectML.dll` (v1.0, 2020 on Win10), which ORT 1.24's DML EP rejects
+  at session creation ("feature level is not supported" → clean CPU fallback).
+  ScreenTranslator.Translation.csproj now pins Microsoft.AI.DirectML 1.15.4 and
+  copies its `bin\x64-win\DirectML.dll` explicitly; verify the DLL is present in
+  any packaged build.
+- **Measured on the Arc 140V dev iGPU (2026-07) and re-measured on the RTX 3070
+  (2026-07-12, with the correct DirectML.dll 1.15.4):** DirectML is *broken for
+  these models on both vendors* — opus-mt fp32 on DML produced garbage output at
+  ~13 s/input on the 3070 (~30 s on Arc) vs <2 s clean on CPU; NLLB fp32 on DML
+  produced garbage at ~30 s/input; NLLB int8 on DML hard-crashed on Arc (now
+  guarded → CPU). Since it reproduces identically on NVIDIA and Intel with the
+  proper redistributable, the fault is the KV-cache merged-decoder subgraph on
+  the DML EP itself, not drivers/hardware. Treat `ExecutionProvider=directml` as
+  non-viable for the current exports.
+- **NLLB-200 on CPU (int8, 3070 machine, 2026-07-12):** correct output but
+  2.8–24 s per block — not interactive. Consequence: opus-mt on CPU remains the
+  only shipping-quality path today.
+- **CUDA EP is the remaining GPU option** for the NVIDIA target now that DirectML
+  is ruled out (needs Microsoft.ML.OnnxRuntime.Gpu + CUDA/cuDNN install, hence
+  not the default). Alternatives if pursued: non-merged decoder exports (the
+  merged `If`-node/KV-cache subgraph is the DML suspect) or a newer ORT.
