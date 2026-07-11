@@ -2,17 +2,25 @@
 //
 //   dotnet run --project tools/TranslatorCli -- "你好，世界"
 //   dotnet run --project tools/TranslatorCli -- --model-dir C:\path\to\models "设置" "文件"
-//   dotnet run --project tools/TranslatorCli -- --quantized "你好"   # force int8 weights
+//   dotnet run --project tools/TranslatorCli -- --quantized "你好"       # force int8 weights
+//   dotnet run --project tools/TranslatorCli -- --engine nllb "你好"     # NLLB benchmark engine
+//   dotnet run --project tools/TranslatorCli -- --beams 6 "你好"         # override beam width
 //
-// Flags: --model-dir <path>, --quantized/--int8 (force int8), --fp32 (force fp32,
-// the default). Remaining args are translated in sequence. Prints each translation
-// with per-call timing. Exits non-zero with an actionable message when the model is missing.
+// Flags: --model-dir <path>, --engine opus|nllb (default opus; nllb is BENCHMARK
+// ONLY and reads from the sibling models-nllb dir), --beams <n> (override beam
+// width; opus default is min(config,4)), --quantized/--int8 (force int8, opus only),
+// --fp32 (force fp32, the opus default). Remaining args are translated in sequence.
+// Prints each translation with per-call timing. Exits non-zero with an actionable
+// message when the model is missing.
 using System.Diagnostics;
 using ScreenTranslator.Core.Config;
+using ScreenTranslator.Core.Translation;
 using ScreenTranslator.Translation;
 
 string? modelDir = null;
 bool preferQuantized = false; // default matches the engine (fp32)
+string engine = "opus";       // "opus" (default, app engine) or "nllb" (benchmark only)
+int? beamWidth = null;        // null -> engine default (min(config, 4))
 var texts = new List<string>();
 
 for (int i = 0; i < args.Length; i++)
@@ -21,6 +29,12 @@ for (int i = 0; i < args.Length; i++)
     {
         case "--model-dir" when i + 1 < args.Length:
             modelDir = args[++i];
+            break;
+        case "--engine" when i + 1 < args.Length:
+            engine = args[++i].ToLowerInvariant();
+            break;
+        case "--beams" when i + 1 < args.Length:
+            beamWidth = int.Parse(args[++i]);
             break;
         case "--quantized":
         case "--int8":
@@ -35,7 +49,21 @@ for (int i = 0; i < args.Length; i++)
     }
 }
 
-modelDir ??= new AppConfig().ResolveModelDirectory();
+if (engine != "opus" && engine != "nllb")
+{
+    Console.Error.WriteLine($"ERROR: unknown --engine '{engine}'. Use 'opus' (default) or 'nllb'.");
+    return 2;
+}
+
+// opus-mt lives in the app's model dir; NLLB (benchmark only) lives beside it in
+// a sibling 'models-nllb' directory.
+if (modelDir is null)
+{
+    string opusDir = new AppConfig().ResolveModelDirectory();
+    modelDir = engine == "nllb"
+        ? Path.Combine(Path.GetDirectoryName(opusDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))!, "models-nllb")
+        : opusDir;
+}
 
 if (texts.Count == 0)
 {
@@ -49,10 +77,15 @@ if (texts.Count == 0)
     Console.WriteLine("(no input given — running the built-in sample set)\n");
 }
 
+Console.WriteLine($"Engine: {(engine == "nllb" ? "NLLB-200-distilled-600M (int8, BENCHMARK ONLY)" : "opus-mt-zh-en")}");
 Console.WriteLine($"Model directory: {modelDir}");
-Console.WriteLine($"Weights: {(preferQuantized ? "quantized (int8)" : "full-precision (fp32)")}\n");
+if (engine == "opus")
+    Console.WriteLine($"Weights: {(preferQuantized ? "quantized (int8)" : "full-precision (fp32)")}");
+Console.WriteLine($"Beams: {(beamWidth?.ToString() ?? "engine default")}\n");
 
-using var translator = new LocalOnnxTranslator(modelDir, preferQuantized: preferQuantized);
+using ITranslator translator = engine == "nllb"
+    ? new NllbOnnxTranslator(modelDir, numBeams: beamWidth ?? 4)
+    : new LocalOnnxTranslator(modelDir, preferQuantized: preferQuantized, beamWidth: beamWidth);
 
 var sw = Stopwatch.StartNew();
 try

@@ -11,8 +11,15 @@ namespace ScreenTranslator.Translation;
 /// Fully local (no-cloud) Chinese-&gt;English translation engine built on ONNX
 /// Runtime. Runs the Helsinki-NLP opus-mt-zh-en Marian model exported to ONNX
 /// (Hugging Face repo <c>Xenova/opus-mt-zh-en</c>: separate encoder +
-/// KV-cache-merged decoder). Greedy decoding, single-flight (calls serialized
-/// internally). Get the model with <c>scripts/download-model.ps1</c>.
+/// KV-cache-merged decoder). Single-flight (calls serialized internally). Get the
+/// model with <c>scripts/download-model.ps1</c>.
+///
+/// <para>Quality: the input block is <b>segmented into sentences</b>
+/// (<see cref="SentenceSegmenter"/>) and each sentence is translated separately —
+/// Marian models are trained on sentence pairs and degrade badly on multi-sentence
+/// paragraphs. Decoding is <b>beam search</b> with no-repeat-n-gram blocking and a
+/// repetition penalty (<see cref="Seq2SeqOnnxEngine"/>), which removes the runaway
+/// repetition loops the previous greedy decoder produced on dense prose.</para>
 /// </summary>
 public sealed class LocalOnnxTranslator : ITranslator
 {
@@ -22,11 +29,13 @@ public sealed class LocalOnnxTranslator : ITranslator
 
     private readonly string _modelDirectory;
     private readonly bool _preferQuantized;
+    private readonly int? _beamWidthOverride;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     private InferenceSession? _encoder;
     private InferenceSession? _decoder;
     private Tokenizer? _tokenizer;
+    private Seq2SeqOnnxEngine? _engine;
 
     // Decoding parameters (loaded from config.json / generation_config.json).
     private int _decoderStartTokenId = 65000;
@@ -36,9 +45,16 @@ public sealed class LocalOnnxTranslator : ITranslator
     private int _numHeads = 8;
     private int _headDim = 64;
     private int _maxNewTokens = 256;
+    private int _numBeams = 4;
+    private double _lengthPenalty = 1.0;
 
-    // Runaway-repetition guard: stop if one token repeats this many times in a row.
-    private const int MaxConsecutiveRepeats = 8;
+    // Beam width is capped for latency: opus-mt's config asks for 6, but on this CPU
+    // 4 is the quality/latency sweet spot (see the engine's benchmark report).
+    private const int DefaultBeamCap = 4;
+
+    // A single "sentence" longer than this many source tokens is split further at
+    // comma-class punctuation before translation (keeps Marian in its comfort zone).
+    private const int MaxSentenceTokens = 100;
 
     public bool IsReady { get; private set; }
 
@@ -58,10 +74,18 @@ public sealed class LocalOnnxTranslator : ITranslator
     /// Whichever variant is preferred, the other is used as a fallback if the
     /// preferred files are absent.
     /// </param>
-    public LocalOnnxTranslator(string modelDirectory, bool preferQuantized = false)
+    /// <param name="beamWidth">
+    /// Optional override for the beam-search width. When null (default) the engine
+    /// uses <c>min(generation_config.num_beams, 4)</c>. Pass 1 for greedy decoding,
+    /// or a larger value to trade latency for quality.
+    /// </param>
+    public LocalOnnxTranslator(string modelDirectory, bool preferQuantized = false, int? beamWidth = null)
     {
         _modelDirectory = modelDirectory ?? throw new ArgumentNullException(nameof(modelDirectory));
         _preferQuantized = preferQuantized;
+        if (beamWidth is int bw && bw < 1)
+            throw new ArgumentOutOfRangeException(nameof(beamWidth), "Beam width must be >= 1.");
+        _beamWidthOverride = beamWidth;
     }
 
     public async Task InitializeAsync(CancellationToken ct = default)
@@ -91,6 +115,7 @@ public sealed class LocalOnnxTranslator : ITranslator
             _encoder = new InferenceSession(encoderPath, options);
             _decoder = new InferenceSession(decoderPath, options);
             _tokenizer = new Tokenizer(vocabPath: SanitizeTokenizer(tokenizerPath));
+            _engine = new Seq2SeqOnnxEngine(_encoder, _decoder, _numLayers, _numHeads, _headDim);
         }, ct).ConfigureAwait(false);
 
         IsReady = true;
@@ -100,7 +125,7 @@ public sealed class LocalOnnxTranslator : ITranslator
     {
         if (string.IsNullOrWhiteSpace(text))
             return string.Empty;
-        if (!IsReady || _encoder is null || _decoder is null || _tokenizer is null)
+        if (!IsReady || _tokenizer is null || _engine is null)
             throw new InvalidOperationException("Translator not initialized. Call InitializeAsync first.");
 
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -116,153 +141,69 @@ public sealed class LocalOnnxTranslator : ITranslator
 
     private string RunTranslation(string text, CancellationToken ct)
     {
-        var enc = _encoder!;
-        var dec = _decoder!;
         var tok = _tokenizer!;
+        var engine = _engine!;
 
-        // 1) Tokenize source. Tokenizers.DotNet appends the </s> (eos) the encoder expects.
-        uint[] srcIds = tok.Encode(text);
-        int srcLen = srcIds.Length;
-        if (srcLen == 0) return string.Empty;
-
-        var inputIds = new DenseTensor<long>(new[] { 1, srcLen });
-        var attnMask = new DenseTensor<long>(new[] { 1, srcLen });
-        for (int i = 0; i < srcLen; i++)
+        var options = new GenerationOptions
         {
-            inputIds[0, i] = srcIds[i];
-            attnMask[0, i] = 1;
-        }
+            DecoderStartTokenId = _decoderStartTokenId,
+            EosTokenId = _eosTokenId,
+            PadTokenId = _padTokenId,
+            MaxNewTokens = _maxNewTokens,
+            NumBeams = _numBeams,
+            LengthPenalty = _lengthPenalty,
+        };
 
-        // 2) Encoder pass -> encoder_hidden_states (reused every decode step).
-        DenseTensor<float> encoderHidden;
-        using (var encResults = enc.Run(new[]
-        {
-            NamedOnnxValue.CreateFromTensor("input_ids", inputIds),
-            NamedOnnxValue.CreateFromTensor("attention_mask", attnMask),
-        }))
-        {
-            encoderHidden = CopyFloat(First(encResults, "last_hidden_state"));
-        }
-
-        // 3) Greedy decode with the KV-cache-merged decoder.
-        var encoderMask = new DenseTensor<long>(new[] { 1, srcLen });
-        for (int i = 0; i < srcLen; i++) encoderMask[0, i] = 1;
-
-        // Empty (zero-length) self/cross-attention caches for the first (no-cache) pass.
-        var emptyDecoderKv = new DenseTensor<float>(new[] { 1, _numHeads, 0, _headDim });
-        DenseTensor<float>[] pastDecoder = new DenseTensor<float>[_numLayers * 2];
-        DenseTensor<float>[] cachedEncoderKv = new DenseTensor<float>[_numLayers * 2]; // filled after step 0
-
-        var generated = new List<uint>(_maxNewTokens);
-        int currentToken = _decoderStartTokenId;
-        bool firstStep = true;
-        int lastToken = -1;
-        int repeatRun = 0;
-
-        for (int step = 0; step < _maxNewTokens; step++)
+        // Segment the block into sentences and translate each one on its own — Marian
+        // MT degrades sharply on multi-sentence input. Outputs are joined with a space.
+        var parts = new List<string>();
+        foreach (string sentence in SentenceSegmenter.Split(text))
         {
             ct.ThrowIfCancellationRequested();
-
-            var stepInputIds = new DenseTensor<long>(new[] { 1, 1 });
-            stepInputIds[0, 0] = currentToken;
-
-            var inputs = new List<NamedOnnxValue>(4 + _numLayers * 4)
+            foreach (string chunk in ChunkBySourceTokens(sentence, tok))
             {
-                NamedOnnxValue.CreateFromTensor("input_ids", stepInputIds),
-                NamedOnnxValue.CreateFromTensor("encoder_attention_mask", encoderMask),
-                NamedOnnxValue.CreateFromTensor("encoder_hidden_states", encoderHidden),
-                NamedOnnxValue.CreateFromTensor("use_cache_branch",
-                    new DenseTensor<bool>(new[] { !firstStep }, new[] { 1 })),
-            };
-            for (int l = 0; l < _numLayers; l++)
-            {
-                var decKey = firstStep ? emptyDecoderKv : pastDecoder[l * 2];
-                var decVal = firstStep ? emptyDecoderKv : pastDecoder[l * 2 + 1];
-                var encKey = firstStep ? emptyDecoderKv : cachedEncoderKv[l * 2];
-                var encVal = firstStep ? emptyDecoderKv : cachedEncoderKv[l * 2 + 1];
-                inputs.Add(NamedOnnxValue.CreateFromTensor($"past_key_values.{l}.decoder.key", decKey));
-                inputs.Add(NamedOnnxValue.CreateFromTensor($"past_key_values.{l}.decoder.value", decVal));
-                inputs.Add(NamedOnnxValue.CreateFromTensor($"past_key_values.{l}.encoder.key", encKey));
-                inputs.Add(NamedOnnxValue.CreateFromTensor($"past_key_values.{l}.encoder.value", encVal));
-            }
+                uint[] srcIds = tok.Encode(chunk);
+                if (srcIds.Length == 0) continue;
 
-            using var results = dec.Run(inputs);
+                List<int> outIds = engine.Generate(srcIds, options, ct);
+                if (outIds.Count == 0) continue;
 
-            int nextToken = ArgMaxLastStep(First(results, "logits"));
-
-            // Update KV caches for the next step (copied out before results dispose).
-            for (int l = 0; l < _numLayers; l++)
-            {
-                pastDecoder[l * 2] = CopyFloat(First(results, $"present.{l}.decoder.key"));
-                pastDecoder[l * 2 + 1] = CopyFloat(First(results, $"present.{l}.decoder.value"));
-                if (firstStep)
-                {
-                    cachedEncoderKv[l * 2] = CopyFloat(First(results, $"present.{l}.encoder.key"));
-                    cachedEncoderKv[l * 2 + 1] = CopyFloat(First(results, $"present.{l}.encoder.value"));
-                }
-            }
-
-            firstStep = false;
-
-            if (nextToken == _eosTokenId) break;
-
-            generated.Add((uint)nextToken);
-            currentToken = nextToken;
-
-            // Runaway-repetition guard.
-            if (nextToken == lastToken)
-            {
-                if (++repeatRun >= MaxConsecutiveRepeats) break;
-            }
-            else
-            {
-                repeatRun = 0;
-                lastToken = nextToken;
+                string english = tok.Decode(outIds.Select(x => (uint)x).ToArray()).Trim();
+                if (english.Length > 0) parts.Add(english);
             }
         }
 
-        if (generated.Count == 0) return string.Empty;
-        return tok.Decode(generated.ToArray()).Trim();
+        return string.Join(" ", parts);
     }
 
-    // ----- logits / tensor helpers -------------------------------------------------
-
-    /// <summary>Argmax over the last position's logits, masking the pad token.</summary>
-    private int ArgMaxLastStep(DisposableNamedOnnxValue logitsValue)
+    /// <summary>
+    /// Yields translation chunks for one sentence. Normally the sentence itself; but
+    /// if it still exceeds <see cref="MaxSentenceTokens"/> source tokens it is broken
+    /// at comma-class punctuation and the clauses are regrouped to stay under the cap.
+    /// </summary>
+    private IEnumerable<string> ChunkBySourceTokens(string sentence, Tokenizer tok)
     {
-        var logits = logitsValue.AsTensor<float>();
-        var dims = logits.Dimensions; // [1, seq, vocab]
-        int seq = dims[1];
-        int vocab = dims[2];
-        int last = seq - 1;
-
-        int best = 0;
-        float bestVal = float.NegativeInfinity;
-        for (int v = 0; v < vocab; v++)
+        if (tok.Encode(sentence).Length <= MaxSentenceTokens)
         {
-            if (v == _padTokenId) continue; // bad_words_ids: never emit pad
-            float val = logits[0, last, v];
-            if (val > bestVal)
-            {
-                bestVal = val;
-                best = v;
-            }
+            yield return sentence;
+            yield break;
         }
-        return best;
-    }
 
-    private static DenseTensor<float> CopyFloat(DisposableNamedOnnxValue value)
-    {
-        var t = value.AsTensor<float>();
-        return new DenseTensor<float>(t.ToArray(), t.Dimensions.ToArray());
-    }
-
-    private static DisposableNamedOnnxValue First(
-        IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results, string name)
-    {
-        foreach (var r in results)
-            if (r.Name == name) return r;
-        throw new KeyNotFoundException($"ONNX output '{name}' not found.");
+        var buffer = new System.Text.StringBuilder();
+        int bufferTokens = 0;
+        foreach (string clause in SentenceSegmenter.SplitClauses(sentence))
+        {
+            int clauseTokens = tok.Encode(clause).Length;
+            if (buffer.Length > 0 && bufferTokens + clauseTokens > MaxSentenceTokens)
+            {
+                yield return buffer.ToString();
+                buffer.Clear();
+                bufferTokens = 0;
+            }
+            buffer.Append(clause);
+            bufferTokens += clauseTokens;
+        }
+        if (buffer.Length > 0) yield return buffer.ToString();
     }
 
     // ----- init helpers ------------------------------------------------------------
@@ -306,6 +247,13 @@ public sealed class LocalOnnxTranslator : ITranslator
 
         int? maxLen = ReadInt(gen, "max_length") ?? ReadInt(config, "max_length");
         if (maxLen is int ml && ml > 0) _maxNewTokens = Math.Min(_maxNewTokens, ml);
+
+        // Beam width: config asks for 6; cap at DefaultBeamCap for latency unless the
+        // caller explicitly overrode it. length_penalty defaults to 1.0 (opus-mt's
+        // generation_config does not set it).
+        int configBeams = ReadInt(gen, "num_beams") ?? ReadInt(config, "num_beams") ?? _numBeams;
+        _numBeams = _beamWidthOverride ?? Math.Min(configBeams, DefaultBeamCap);
+        _lengthPenalty = ReadDouble(gen, "length_penalty") ?? ReadDouble(config, "length_penalty") ?? _lengthPenalty;
     }
 
     private static JsonObject? TryReadJson(string path)
@@ -321,6 +269,12 @@ public sealed class LocalOnnxTranslator : ITranslator
     {
         if (obj is null || !obj.TryGetPropertyValue(key, out var node) || node is null) return null;
         try { return node.GetValue<int>(); } catch { return null; }
+    }
+
+    private static double? ReadDouble(JsonObject? obj, string key)
+    {
+        if (obj is null || !obj.TryGetPropertyValue(key, out var node) || node is null) return null;
+        try { return node.GetValue<double>(); } catch { return null; }
     }
 
     /// <summary>
@@ -359,6 +313,7 @@ public sealed class LocalOnnxTranslator : ITranslator
         _encoder?.Dispose();
         _decoder?.Dispose();
         _gate.Dispose();
+        _engine = null;
         _encoder = null;
         _decoder = null;
         _tokenizer = null;
