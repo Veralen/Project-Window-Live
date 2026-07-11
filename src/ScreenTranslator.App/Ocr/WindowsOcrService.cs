@@ -23,25 +23,30 @@ namespace ScreenTranslator.App.Ocr;
 /// </summary>
 internal sealed class WindowsOcrService : IOcrService
 {
-    private readonly string _configuredLanguage;
+    private readonly Core.Config.AppConfig _config;
     private readonly Action<string, string> _notify; // (title, message)
-    private bool _fallbackNotified;
+    private string? _notifiedLanguage; // last configured language we warned about
 
-    public WindowsOcrService(string configuredLanguage, Action<string, string> notify)
+    // Reads OcrLanguage from live config on every call so a Settings language
+    // change takes effect on the next snip without rebuilding the service.
+    private string ConfiguredLanguage => _config.OcrLanguage;
+
+    public WindowsOcrService(Core.Config.AppConfig config, Action<string, string> notify)
     {
-        _configuredLanguage = configuredLanguage;
+        _config = config;
         _notify = notify;
     }
 
     public async Task<OcrRegionResult> RecognizeAsync(CapturedRegion region, CancellationToken ct = default)
     {
+        string configuredLanguage = ConfiguredLanguage;
         OcrEngine? engine = ResolveEngine();
         if (engine is null)
         {
             _notify("OCR unavailable",
-                $"No OCR language pack matched '{_configuredLanguage}' and no user-profile engine is available. " +
+                $"No OCR language pack matched '{configuredLanguage}' and no user-profile engine is available. " +
                 "Install a language pack under Settings > Time & Language > Language.");
-            return new OcrRegionResult(Array.Empty<CoreOcrLine>(), _configuredLanguage);
+            return new OcrRegionResult(Array.Empty<CoreOcrLine>(), configuredLanguage);
         }
 
         string engineTag = engine.RecognizerLanguage.LanguageTag;
@@ -49,12 +54,12 @@ internal sealed class WindowsOcrService : IOcrService
         // A user-profile fallback engine in a language that doesn't match the
         // configured one silently misreads the source text (e.g. en-US OCR over
         // Chinese produces Latin garbage that then gets "translated"). Surface it
-        // once per session instead of failing quietly.
-        if (!_fallbackNotified && !Bcp47PrefixMatch(_configuredLanguage, engineTag))
+        // once per configured language instead of failing quietly.
+        if (_notifiedLanguage != configuredLanguage && !Bcp47PrefixMatch(configuredLanguage, engineTag))
         {
-            _fallbackNotified = true;
+            _notifiedLanguage = configuredLanguage;
             _notify("OCR language pack missing",
-                $"No '{_configuredLanguage}' OCR pack is installed — using '{engineTag}' instead, " +
+                $"No '{configuredLanguage}' OCR pack is installed — using '{engineTag}' instead, " +
                 "so the snipped text will likely be misread. Run scripts/install-ocr-language.ps1 " +
                 "as administrator, then restart the app.");
         }
@@ -136,7 +141,7 @@ internal sealed class WindowsOcrService : IOcrService
         // 1) Prefix match the configured tag against installed recognizer languages.
         foreach (var lang in OcrEngine.AvailableRecognizerLanguages)
         {
-            if (Bcp47PrefixMatch(_configuredLanguage, lang.LanguageTag))
+            if (Bcp47PrefixMatch(ConfiguredLanguage, lang.LanguageTag))
             {
                 var e = OcrEngine.TryCreateFromLanguage(lang);
                 if (e is not null) return e;

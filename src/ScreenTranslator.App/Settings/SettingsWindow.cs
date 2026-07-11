@@ -15,7 +15,7 @@ namespace ScreenTranslator.App.Settings;
 /// on failure the window stays open, shows the error, and leaves config untouched.
 ///
 /// <para>Also hosts the translation debug panel: switch the model (opus/NLLB) and
-/// execution provider (CPU/DirectML) without editing config.json, plus a live
+/// execution provider (CPU/CUDA) without editing config.json, plus a live
 /// status readout of the engine actually loaded, whether it runs on CPU or GPU,
 /// and whether the configured OCR language pack is installed (a missing pack
 /// silently falls back to English OCR, which misreads CJK text — the classic
@@ -31,9 +31,29 @@ internal sealed class SettingsWindow : Window
     // Rebuilds the translation engine after Engine/ExecutionProvider changed in config.
     private readonly Action _applyTranslation;
 
+    /// <summary>
+    /// Curated source languages: display name, FLORES-200 code (NLLB direction),
+    /// and the BCP-47 tag used to pick the Windows OCR pack. Selecting one sets
+    /// SourceLanguage + OcrLanguage together so OCR and translation can't drift.
+    /// </summary>
+    private static readonly (string Display, string Flores, string Ocr)[] Languages =
+    {
+        ("Chinese (Simplified)", "zho_Hans", "zh-Hans"),
+        ("Chinese (Traditional)", "zho_Hant", "zh-Hant"),
+        ("Japanese", "jpn_Jpan", "ja"),
+        ("Korean", "kor_Hang", "ko"),
+        ("French", "fra_Latn", "fr"),
+        ("German", "deu_Latn", "de"),
+        ("Spanish", "spa_Latn", "es"),
+        ("Italian", "ita_Latn", "it"),
+        ("Portuguese", "por_Latn", "pt"),
+        ("Russian", "rus_Cyrl", "ru"),
+    };
+
     private readonly HotkeyCaptureBox _capture;
     private readonly TextBlock _message;
     private readonly Button _saveButton;
+    private readonly ComboBox _languageBox;
     private readonly ComboBox _engineBox;
     private readonly ComboBox _providerBox;
     private readonly TextBlock _modelWarning;
@@ -123,6 +143,17 @@ internal sealed class SettingsWindow : Window
             Margin = new Thickness(0, 0, 0, 8),
         });
 
+        _languageBox = MakeCombo(Languages.Select(l => (l.Flores, $"{l.Display} → English")).ToArray());
+        // A hand-edited config may hold a code outside the curated list; keep it
+        // selectable (and its OcrLanguage untouched) instead of silently reverting.
+        if (!Languages.Any(l => string.Equals(l.Flores, _config.SourceLanguage, StringComparison.OrdinalIgnoreCase)))
+            _languageBox.Items.Add(new ComboBoxItem
+            {
+                Content = $"Custom ({_config.SourceLanguage} → {_config.TargetLanguage})",
+                Tag = _config.SourceLanguage,
+            });
+        root.Children.Add(MakeLabeledRow("Language", _languageBox));
+
         _engineBox = MakeCombo(
             ("opus", "opus-mt zh→en (default, fast)"),
             ("nllb", "NLLB-200 600M (multilingual, heavier)"));
@@ -130,11 +161,13 @@ internal sealed class SettingsWindow : Window
 
         _providerBox = MakeCombo(
             ("cpu", "CPU (default)"),
-            ("directml", "GPU (DirectML)"));
+            ("cuda", "GPU (CUDA — NVIDIA only)"));
         root.Children.Add(MakeLabeledRow("Run on", _providerBox));
 
+        SelectByTag(_languageBox, _config.SourceLanguage);
         SelectByTag(_engineBox, _config.ResolveEngine());
         SelectByTag(_providerBox, _config.ResolveExecutionProvider());
+        _languageBox.SelectionChanged += (_, _) => UpdateModelWarning();
         _engineBox.SelectionChanged += (_, _) => UpdateModelWarning();
         _providerBox.SelectionChanged += (_, _) => UpdateModelWarning();
 
@@ -250,29 +283,48 @@ internal sealed class SettingsWindow : Window
 
     /// <summary>
     /// Pre-save advisory for the current dropdown selection: missing model files
-    /// (the engine would silently fall back to echo passthrough) and the DirectML
+    /// (the engine would silently fall back to echo passthrough) and the CUDA
     /// caveats. Purely informational — Save is never blocked.
     /// </summary>
     private void UpdateModelWarning()
     {
-        if (_engineBox is null || _providerBox is null || _modelWarning is null) return;
+        if (_languageBox is null || _engineBox is null || _providerBox is null || _modelWarning is null) return;
 
+        string flores = SelectedTag(_languageBox);
         string engine = SelectedTag(_engineBox);
         string provider = SelectedTag(_providerBox);
+        string ocrTag = OcrTagFor(flores);
         string warning = string.Empty;
 
-        if (engine == "nllb" && !PipelineFactory.NllbModelPresent(_config.ResolveNllbModelDirectory()))
+        if (engine == "opus" && !flores.StartsWith("zho", StringComparison.OrdinalIgnoreCase))
+            warning = "The opus-mt model only translates Chinese → English. Pick the NLLB model " +
+                      "to translate this language.";
+        else if (engine == "nllb" && !PipelineFactory.NllbModelPresent(_config.ResolveNllbModelDirectory()))
             warning = $"NLLB model files not found in '{_config.ResolveNllbModelDirectory()}' — " +
-                      "labels would show \"[no model]\" passthrough. Run scripts/download-model-nllb.ps1 first.";
+                      "the app would fall back to opus-mt (zh→en only). Run scripts/download-model-nllb.ps1 first.";
         else if (engine == "opus" && !PipelineFactory.OpusModelPresent(_config.ResolveModelDirectory()))
             warning = $"opus-mt model files not found in '{_config.ResolveModelDirectory()}' — " +
                       "labels would show \"[no model]\" passthrough. Run scripts/download-model.ps1 first.";
-        else if (provider == "directml")
-            warning = "GPU (DirectML) needs fp32 model weights; int8-only models stay on CPU, and if GPU " +
-                      "init fails the engine falls back to CPU automatically (see status below after saving).";
+        else if (Ocr.WindowsOcrService.FindInstalledMatch(ocrTag) is null)
+            warning = $"No Windows OCR pack is installed for '{ocrTag}' — snips would be misread. " +
+                      "Run scripts/install-ocr-language.ps1 as administrator (or install the language " +
+                      "under Windows Settings > Time & Language), then restart the app.";
+        else if (provider == "cuda")
+            warning = "GPU (CUDA) needs an NVIDIA GPU, the CUDA 12/cuDNN 9 runtime DLLs beside the app, " +
+                      "and fp32 model weights (int8-only models stay on CPU). If GPU init fails the engine " +
+                      "falls back to CPU automatically (see status below after saving).";
 
         _modelWarning.Text = warning;
         _modelWarning.Visibility = warning.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>OCR BCP-47 tag for a FLORES-200 code; custom codes keep the configured OcrLanguage.</summary>
+    private string OcrTagFor(string flores)
+    {
+        foreach (var l in Languages)
+            if (string.Equals(l.Flores, flores, StringComparison.OrdinalIgnoreCase))
+                return l.Ocr;
+        return _config.OcrLanguage;
     }
 
     /// <summary>Refreshes the live status readout (active model, CPU/GPU, OCR pack).</summary>
@@ -324,7 +376,7 @@ internal sealed class SettingsWindow : Window
 
     private static string ProviderDisplay(string provider) => provider switch
     {
-        "directml" => "GPU (DirectML)",
+        "cuda" => "GPU (CUDA)",
         "cpu" => "CPU",
         _ => provider,
     };
@@ -375,9 +427,11 @@ internal sealed class SettingsWindow : Window
         }
 
         string newHotkey = _capture.HotkeyString!;
+        string newLanguage = SelectedTag(_languageBox);
         string newEngine = SelectedTag(_engineBox);
         string newProvider = SelectedTag(_providerBox);
         bool translationChanged =
+            !string.Equals(newLanguage, _config.SourceLanguage, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(newEngine, _config.ResolveEngine(), StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(newProvider, _config.ResolveExecutionProvider(), StringComparison.OrdinalIgnoreCase);
 
@@ -393,6 +447,8 @@ internal sealed class SettingsWindow : Window
         }
 
         _config.Hotkey = newHotkey;
+        _config.OcrLanguage = OcrTagFor(newLanguage); // set BEFORE SourceLanguage (custom keeps current tag)
+        _config.SourceLanguage = newLanguage;
         _config.Engine = newEngine;
         _config.ExecutionProvider = newProvider;
         try

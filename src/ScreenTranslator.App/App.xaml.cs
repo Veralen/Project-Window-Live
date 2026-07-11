@@ -63,6 +63,17 @@ public partial class App : Application
         // Diagnostics carry Chinese OCR text; keep console/redirected logs UTF-8.
         try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { /* no console attached */ }
 
+        // Optional CUDA runtime DLLs ship loose beside the exe (they can't join the
+        // single-file bundle: ORT loads onnxruntime_providers_cuda.dll from its
+        // extraction dir with an altered search path that never checks the app dir).
+        // Prepending the exe dir to PATH — searched last in every load mode — makes
+        // both that provider's static CUDA imports and cuDNN's load-by-name resolve.
+        // Harmless when the DLLs are absent (CPU-only machines).
+        string? exeDir = System.IO.Path.GetDirectoryName(Environment.ProcessPath);
+        if (!string.IsNullOrEmpty(exeDir))
+            Environment.SetEnvironmentVariable("PATH",
+                exeDir + ";" + Environment.GetEnvironmentVariable("PATH"));
+
         // File logging + global exception surfacing come first: a WinExe has no
         // console, so without these an early failure is completely invisible.
         AppLog.Initialize();
@@ -95,7 +106,7 @@ public partial class App : Application
         Action<string, string> notify = (title, message) =>
             Dispatcher.Invoke(() => ShowBalloon(title, message));
 
-        var ocr = new WindowsOcrService(_config.OcrLanguage, notify);
+        var ocr = new WindowsOcrService(_config, notify);
         _factory = new PipelineFactory(_config);
         _translator = _factory.CreateTranslator();
         // Kick off model load once at startup; the snip pipeline awaits this
@@ -270,7 +281,7 @@ public partial class App : Application
     /// <summary>
     /// Live snapshot for the Settings debug panel: which engine/model object is
     /// active right now, whether it finished loading, the execution provider it
-    /// actually ended up on (DirectML can fall back to CPU), and whether an OCR
+    /// actually ended up on (CUDA can fall back to CPU), and whether an OCR
     /// pack matching the configured language is installed.
     /// </summary>
     // Installed OCR packs don't change while the app runs (a new pack needs an app
@@ -338,7 +349,7 @@ public partial class App : Application
         Log($"[settings] Translation engine rebuilt: engine={engine}, provider={provider}.");
         ShowBalloon("Translation engine",
             $"Switching to {(engine == "nllb" ? "NLLB-200 600M" : "opus-mt zh→en")} on " +
-            $"{(provider == "directml" ? "GPU (DirectML)" : "CPU")} — loading model…");
+            $"{(provider == "cuda" ? "GPU (CUDA)" : "CPU")} — loading model…");
     }
 
     private void DrainRetiredTranslators()

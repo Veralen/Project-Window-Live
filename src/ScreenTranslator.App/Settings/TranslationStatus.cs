@@ -3,11 +3,11 @@ namespace ScreenTranslator.App.Settings;
 /// <summary>
 /// Point-in-time snapshot of the translation/OCR runtime state, produced by the
 /// app shell for the Settings debug panel. Providers are the canonical strings
-/// from OnnxSessionFactory ("cpu"/"directml"); <see cref="ActiveProvider"/> is
+/// from OnnxSessionFactory ("cpu"/"cuda"); <see cref="ActiveProvider"/> is
 /// "n/a" when no ONNX engine is loaded (echo passthrough).
 /// </summary>
 /// <param name="EngineLabel">Human-readable name of the loaded engine/model.</param>
-/// <param name="RequestedProvider">Execution provider from config ("cpu"/"directml").</param>
+/// <param name="RequestedProvider">Execution provider from config ("cpu"/"cuda").</param>
 /// <param name="ActiveProvider">Provider actually in use after init (may differ after a GPU→CPU fallback).</param>
 /// <param name="IsReady">True once the model finished loading.</param>
 /// <param name="IsEcho">True when no model was found and the echo passthrough is active.</param>
