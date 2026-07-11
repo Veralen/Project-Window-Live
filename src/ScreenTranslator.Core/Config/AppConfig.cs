@@ -60,9 +60,19 @@ public sealed class AppConfig
         File.WriteAllText(path, JsonSerializer.Serialize(this, JsonOptions));
     }
 
-    public string ResolveModelDirectory() =>
-        Path.IsPathRooted(ModelDirectory)
-            ? ModelDirectory
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "ScreenTranslator", ModelDirectory);
+    public string ResolveModelDirectory()
+    {
+        if (Path.IsPathRooted(ModelDirectory))
+            return ModelDirectory;
+
+        // A shipped build carries its model in a "models" folder beside the exe;
+        // prefer that so the distributed folder is drop-in with no install step.
+        string besideExe = Path.Combine(AppContext.BaseDirectory, ModelDirectory);
+        if (Directory.Exists(besideExe))
+            return besideExe;
+
+        // Dev / downloaded default: %LOCALAPPDATA%\ScreenTranslator\models.
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ScreenTranslator", ModelDirectory);
+    }
 }

@@ -33,6 +33,9 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // Diagnostics carry Chinese OCR text; keep console/redirected logs UTF-8.
+        try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { /* no console attached */ }
+
         _config = AppConfig.LoadOrDefault();
 
         Action<string, string> notify = (title, message) =>
@@ -89,6 +92,78 @@ public partial class App : Application
             Dispatcher.BeginInvoke(new Action(OpenSettings),
                 System.Windows.Threading.DispatcherPriority.ApplicationIdle);
         }
+
+        // --ocr-image <path> [--crop L,T,W,H] : run OCR→group→translate on a static
+        // image file (deterministic, no live screen capture) and log each zh→en
+        // block, then exit. Verification/demo affordance.
+        string? ocrImage = GetArgValue(e.Args, "--ocr-image");
+        if (ocrImage is not null)
+        {
+            Core.Geometry.PixelRect? crop = ParseCrop(GetArgValue(e.Args, "--crop"));
+            _ = RunOcrImageTestAsync(ocrImage, crop, ocr, factory, translatorReady);
+        }
+    }
+
+    private async System.Threading.Tasks.Task RunOcrImageTestAsync(
+        string path, Core.Geometry.PixelRect? crop, Ocr.WindowsOcrService ocr,
+        PipelineFactory factory, Task translatorReady)
+    {
+        try
+        {
+            var region = LoadImageRegion(path, crop);
+            Log($"[ocr-image] Loaded region {region.PixelWidth}x{region.PixelHeight} from {path}");
+            var ocrResult = await ocr.RecognizeAsync(region);
+            Log($"[ocr-image] OCR: {ocrResult.Lines.Count} lines (lang={ocrResult.LanguageTag})");
+            var blocks = factory.CreateGrouper().Group(ocrResult);
+            Log($"[ocr-image] Group: {blocks.Count} blocks");
+            await translatorReady;
+            int i = 0;
+            foreach (var b in blocks)
+            {
+                string en = await _translator!.TranslateAsync(b.Text);
+                Log($"[ocr-image] block {++i} ZH: {b.Text}");
+                Log($"[ocr-image] block {i}   EN: {en}");
+            }
+            Log("[ocr-image] done.");
+        }
+        catch (Exception ex) { Log($"[ocr-image] ERROR: {ex}"); }
+        finally { Shutdown(); }
+    }
+
+    private static Core.Ocr.CapturedRegion LoadImageRegion(string path, Core.Geometry.PixelRect? crop)
+    {
+        var src = new BitmapImage();
+        src.BeginInit();
+        src.UriSource = new Uri(System.IO.Path.GetFullPath(path));
+        src.CacheOption = BitmapCacheOption.OnLoad;
+        src.EndInit();
+
+        BitmapSource bmp = src;
+        if (crop is { } c)
+        {
+            int cx = (int)Math.Clamp(c.X, 0, bmp.PixelWidth - 1);
+            int cy = (int)Math.Clamp(c.Y, 0, bmp.PixelHeight - 1);
+            int cw = (int)Math.Min(c.Width, bmp.PixelWidth - cx);
+            int ch = (int)Math.Min(c.Height, bmp.PixelHeight - cy);
+            bmp = new CroppedBitmap(bmp, new Int32Rect(cx, cy, cw, ch));
+        }
+
+        var conv = new FormatConvertedBitmap(bmp, PixelFormats.Bgra32, null, 0);
+        int w = conv.PixelWidth, h = conv.PixelHeight, stride = w * 4;
+        var px = new byte[h * stride];
+        conv.CopyPixels(px, stride, 0);
+        return new Core.Ocr.CapturedRegion(px, w, h, new Core.Geometry.PixelRect(0, 0, w, h));
+    }
+
+    private static Core.Geometry.PixelRect? ParseCrop(string? value)
+    {
+        if (value is null) return null;
+        string[] p = value.Split(',', StringSplitOptions.TrimEntries);
+        if (p.Length == 4 &&
+            double.TryParse(p[0], out double l) && double.TryParse(p[1], out double t) &&
+            double.TryParse(p[2], out double w) && double.TryParse(p[3], out double h))
+            return new Core.Geometry.PixelRect(l, t, w, h);
+        return null;
     }
 
     /// <summary>

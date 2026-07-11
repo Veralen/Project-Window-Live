@@ -5,3 +5,4 @@ obj/
 models/
 *.onnx
 TestResults/
+dist/
