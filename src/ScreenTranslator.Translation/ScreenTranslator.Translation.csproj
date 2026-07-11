@@ -15,24 +15,20 @@
       Must NOT coexist with the plain Microsoft.ML.OnnxRuntime package (duplicate
       onnxruntime.dll native conflict) — this replaces it.
     -->
-    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.4" />
     <!--
-      The DirectML.dll REDISTRIBUTABLE. Without it the OS loader falls back to the
-      inbox System32\DirectML.dll (v1.0, 2020 on Win10), which the ORT 1.24 DML EP
-      rejects at session creation with "feature level is not supported" — so the GPU
-      path silently ran on CPU. The package's own .targets only copies the DLL when
-      PlatformTarget is x64 (never set in SDK-style AnyCPU projects) and doesn't flow
-      through ProjectReferences, hence the explicit copy item below;
-      None+CopyToOutputDirectory DOES propagate to the App/CLI outputs and publish.
+      CUDA build of ONNX Runtime (replaces the DirectML build — the DML EP produced
+      garbage for these KV-cache merged-decoder exports on every GPU tested; see
+      docs/architecture.md §execution provider). It bundles the CPU execution
+      provider too, so the default CPU path is byte-for-byte unchanged; it ADDS an
+      optional CUDA (NVIDIA) provider selectable via
+      AppConfig.ExecutionProvider = "cuda". The CUDA/cuDNN runtime DLLs are NOT
+      bundled — they must sit beside the exe or on PATH (cudart64_12, cublas64_12,
+      cublasLt64_12, cufft64_11, cudnn*64_9); when absent, CUDA init throws and the
+      session factory falls back to CPU. Must NOT coexist with other
+      Microsoft.ML.OnnxRuntime.* native packages (duplicate onnxruntime.dll).
     -->
-    <PackageReference Include="Microsoft.AI.DirectML" Version="1.15.4" GeneratePathProperty="true" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Windows" Version="1.24.4" />
     <PackageReference Include="Tokenizers.DotNet" Version="1.4.1" />
     <PackageReference Include="Tokenizers.DotNet.runtime.win-x64" Version="1.4.1" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="$(PkgMicrosoft_AI_DirectML)\bin\x64-win\DirectML.dll"
-          Link="DirectML.dll"
-          CopyToOutputDirectory="PreserveNewest"
-          Visible="false" />
   </ItemGroup>
 </Project>

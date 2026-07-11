@@ -164,7 +164,18 @@ default path is unchanged and it merely *adds* an opt-in DirectML (DX12 GPU) EP.
 - **NLLB-200 on CPU (int8, 3070 machine, 2026-07-12):** correct output but
   2.8–24 s per block — not interactive. Consequence: opus-mt on CPU remains the
   only shipping-quality path today.
-- **CUDA EP is the remaining GPU option** for the NVIDIA target now that DirectML
-  is ruled out (needs Microsoft.ML.OnnxRuntime.Gpu + CUDA/cuDNN install, hence
-  not the default). Alternatives if pursued: non-merged decoder exports (the
-  merged `If`-node/KV-cache subgraph is the DML suspect) or a newer ORT.
+- **CUDA EP replaced DirectML (2026-07-12) and works.** The package is now
+  `Microsoft.ML.OnnxRuntime.Gpu.Windows` (still bundles the CPU EP; CPU default
+  unchanged). `ExecutionProvider = "cuda"` (legacy "directml"/"dml" map to cuda
+  with a log line). Measured on the RTX 3070, NLLB fp32 on CUDA: **correct
+  output at 0.9–4.6 s/block** vs 2.8–24 s int8 on CPU — usable today, before
+  any IOBinding work (the decode loop still round-trips the KV cache over PCIe
+  per token; device-resident cache binding is the known next optimization).
+- **CUDA runtime deployment:** the CUDA 12 / cuDNN 9 DLLs are NOT bundled by the
+  NuGet package. They must be loadable by name (exe directory or PATH):
+  `cudart64_12`, `cublas64_12`, `cublasLt64_12`, `cufft64_11`, `cudnn*64_9`
+  (~2 GB; obtainable from the `nvidia-*-cu12` pip wheels). When absent, CUDA
+  init throws and the factory falls back to CPU — NVIDIA-less machines just run
+  the CPU path. Dev-layout caveat: cuDNN is loaded by name via plain
+  LoadLibrary, which searches the exe dir and PATH but NOT
+  `runtimes\win-x64\native\`, so non-published runs need that dir on PATH.

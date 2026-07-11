@@ -51,7 +51,7 @@ public sealed class NllbOnnxTranslator : ITranslator
     /// <summary>FLORES-200 target language code this instance translates to.</summary>
     public string TargetLanguage { get; }
 
-    /// <summary>The execution provider actually in use after init ("cpu" or "directml").</summary>
+    /// <summary>The execution provider actually in use after init ("cpu" or "cuda").</summary>
     public string ActiveProvider { get; private set; } = OnnxSessionFactory.Cpu;
 
     private InferenceSession? _encoder;
@@ -67,13 +67,12 @@ public sealed class NllbOnnxTranslator : ITranslator
     public bool IsReady { get; private set; }
 
     /// <param name="executionProvider">
-    /// <c>"cpu"</c> (default) or <c>"directml"</c>. On DirectML the engine prefers the
-    /// fp32 weights (int8 dynamic quantization does not benefit DML and can be slower /
-    /// lower quality); on CPU it prefers int8. Whichever is preferred, it falls back to
-    /// whatever files exist. Unknown values fall back to CPU, and a DirectML init
-    /// failure falls back to CPU automatically.
+    /// <c>"cpu"</c> (default) or <c>"cuda"</c> (NVIDIA). On CUDA the engine prefers the
+    /// fp32 weights (int8 dynamic quantization is CPU-targeted); on CPU it prefers
+    /// int8. Whichever is preferred, it falls back to whatever files exist. Unknown
+    /// values fall back to CPU, and a CUDA init failure falls back to CPU automatically.
     /// </param>
-    /// <param name="gpuDeviceId">DirectML adapter index (default 0). Ignored on CPU.</param>
+    /// <param name="gpuDeviceId">CUDA device index (default 0). Ignored on CPU.</param>
     /// <param name="log">Optional sink for provider / file-selection / fallback log lines.</param>
     /// <param name="sourceLanguage">FLORES-200 code of the source language (e.g. "zho_Hans", "jpn_Jpan").</param>
     /// <param name="targetLanguage">FLORES-200 code of the target language (e.g. "eng_Latn").</param>
@@ -101,8 +100,8 @@ public sealed class NllbOnnxTranslator : ITranslator
             throw new FileNotFoundException(
                 $"NLLB model directory not found: '{_modelDirectory}'. {DownloadHint}");
 
-        // DirectML wants fp32 weights; CPU keeps the int8 files (current behavior).
-        bool preferFp32 = OnnxSessionFactory.NormalizeProvider(_executionProvider) == OnnxSessionFactory.DirectMl;
+        // The GPU wants fp32 weights; CPU keeps the int8 files (current behavior).
+        bool preferFp32 = OnnxSessionFactory.NormalizeProvider(_executionProvider) != OnnxSessionFactory.Cpu;
         string encoderPath = ResolveWeightFile(
             "encoder_model.onnx", "encoder_model_quantized.onnx", preferFp32);
         string decoderPath = ResolveWeightFile(
@@ -301,7 +300,7 @@ public sealed class NllbOnnxTranslator : ITranslator
     }
 
     /// <summary>
-    /// Picks the fp32 vs int8 weight file. <paramref name="preferFp32"/> (DirectML)
+    /// Picks the fp32 vs int8 weight file. <paramref name="preferFp32"/> (GPU)
     /// tries <paramref name="fp32Name"/> first; otherwise (CPU) <paramref name="int8Name"/>
     /// first. Falls back to whichever exists, and throws with the download hint if
     /// neither is present.

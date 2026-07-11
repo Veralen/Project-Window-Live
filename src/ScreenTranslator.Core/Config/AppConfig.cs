@@ -42,13 +42,15 @@ public sealed class AppConfig
 
     /// <summary>
     /// ONNX Runtime execution provider: <c>"cpu"</c> (default; the shipping behavior)
-    /// or <c>"directml"</c> to run translation on a DX12 GPU. DirectML is zero-install
-    /// on any DX12 adapter (NVIDIA/AMD/Intel). If DirectML fails to initialize the
-    /// engine automatically falls back to CPU. Unknown values fall back to <c>"cpu"</c>.
+    /// or <c>"cuda"</c> to run translation on an NVIDIA GPU (needs the CUDA 12 /
+    /// cuDNN 9 runtime DLLs beside the exe or on PATH). If CUDA fails to initialize
+    /// the engine automatically falls back to CPU. Legacy <c>"directml"</c>/<c>"dml"</c>
+    /// values map to cuda (the DirectML EP was removed as broken — see
+    /// docs/architecture.md). Unknown values fall back to <c>"cpu"</c>.
     /// </summary>
     public string ExecutionProvider { get; set; } = "cpu";
 
-    /// <summary>DirectML GPU adapter index (default 0). Ignored when ExecutionProvider is "cpu".</summary>
+    /// <summary>CUDA device index (default 0). Ignored when ExecutionProvider is "cpu".</summary>
     public int GpuDeviceId { get; set; } = 0;
 
     public static string DefaultPath =>
@@ -99,14 +101,20 @@ public sealed class AppConfig
     }
 
     /// <summary>
-    /// Normalizes <see cref="ExecutionProvider"/> to a known value ("cpu"/"directml"),
-    /// logging and defaulting to "cpu" on anything unrecognized. Never throws.
+    /// Normalizes <see cref="ExecutionProvider"/> to a known value ("cpu"/"cuda"),
+    /// logging and defaulting to "cpu" on anything unrecognized. Legacy
+    /// "directml"/"dml"/"gpu" values map to "cuda". Never throws.
     /// </summary>
     public string ResolveExecutionProvider(Action<string>? log = null)
     {
         string p = (ExecutionProvider ?? string.Empty).Trim().ToLowerInvariant();
-        if (p == "cpu" || p == "directml") return p;
-        if (p == "dml" || p == "gpu") return "directml";
+        if (p == "cpu" || p == "cuda") return p;
+        if (p == "gpu") return "cuda";
+        if (p == "directml" || p == "dml")
+        {
+            log?.Invoke("[config] ExecutionProvider 'directml' is no longer supported; using 'cuda'.");
+            return "cuda";
+        }
         log?.Invoke($"[config] Unknown ExecutionProvider '{ExecutionProvider}'; using 'cpu'.");
         return "cpu";
     }

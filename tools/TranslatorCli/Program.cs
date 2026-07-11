@@ -11,10 +11,11 @@
 // multilingual engine and reads from the sibling models-nllb dir), --src/--tgt
 // <FLORES-200 code> (nllb only; defaults zho_Hans/eng_Latn), --beams <n> (override
 // beam width; opus default is min(config,4)), --quantized/--int8 (force int8, opus
-// only), --fp32 (force fp32, the opus default), --ep cpu|directml (execution
-// provider, default cpu), --gpu (shorthand for --ep directml), --device <n>
-// (DirectML adapter index). Remaining args are translated in sequence. Prints each
-// translation with per-call timing. Exits non-zero when the model is missing.
+// only), --fp32 (force fp32, the opus default), --ep cpu|cuda (execution
+// provider, default cpu; CUDA needs the CUDA 12/cuDNN 9 DLLs beside the binary or
+// on PATH), --gpu (shorthand for --ep cuda), --device <n> (CUDA device index).
+// Remaining args are translated in sequence. Prints each translation with
+// per-call timing. Exits non-zero when the model is missing.
 using System.Diagnostics;
 using ScreenTranslator.Core.Config;
 using ScreenTranslator.Core.Translation;
@@ -24,8 +25,8 @@ string? modelDir = null;
 bool preferQuantized = false; // default matches the engine (fp32)
 string engine = "opus";       // "opus" (default, app engine) or "nllb" (benchmark only)
 int? beamWidth = null;        // null -> engine default (min(config, 4))
-string provider = "cpu";      // "cpu" (default) or "directml"
-int deviceId = 0;             // DirectML adapter index
+string provider = "cpu";      // "cpu" (default) or "cuda"
+int deviceId = 0;             // CUDA device index
 string srcLang = "zho_Hans";  // FLORES-200 source code (nllb only)
 string tgtLang = "eng_Latn";  // FLORES-200 target code (nllb only)
 var texts = new List<string>();
@@ -54,7 +55,7 @@ for (int i = 0; i < args.Length; i++)
             provider = args[++i].ToLowerInvariant();
             break;
         case "--gpu":
-            provider = "directml";
+            provider = "cuda";
             break;
         case "--device" when i + 1 < args.Length:
             deviceId = int.Parse(args[++i]);
@@ -104,7 +105,7 @@ Console.WriteLine($"Model directory: {modelDir}");
 if (engine == "opus")
     Console.WriteLine($"Weights: {(preferQuantized ? "quantized (int8)" : "full-precision (fp32)")}");
 Console.WriteLine($"Beams: {(beamWidth?.ToString() ?? "engine default")}");
-Console.WriteLine($"Requested provider: {provider}{(provider == "directml" ? $" (device {deviceId})" : "")}");
+Console.WriteLine($"Requested provider: {provider}{(provider != "cpu" ? $" (device {deviceId})" : "")}");
 
 // Provider / file-selection / fallback lines are surfaced to stderr as they happen.
 void Log(string line) => Console.Error.WriteLine(line);

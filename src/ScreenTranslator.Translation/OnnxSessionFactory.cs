@@ -6,27 +6,31 @@ namespace ScreenTranslator.Translation;
 /// The single place where ONNX Runtime <see cref="SessionOptions"/> are constructed
 /// and encoder/decoder <see cref="InferenceSession"/> pairs are created. Both engines
 /// (<see cref="LocalOnnxTranslator"/>, <see cref="NllbOnnxTranslator"/>) go through
-/// here so the CPU-vs-DirectML decision, the DirectML-required session flags, and the
-/// graceful GPU→CPU fallback live in one auditable location.
+/// here so the CPU-vs-CUDA decision and the graceful GPU→CPU fallback live in one
+/// auditable location.
 ///
 /// <para><b>CPU default is sacred:</b> when the provider is CPU the options are built
-/// exactly as the engines built them before the DirectML work (ORT_ENABLE_ALL,
+/// exactly as the engines built them before any GPU work (ORT_ENABLE_ALL,
 /// IntraOp = ProcessorCount/2, InterOp = 1) so shipping behavior is unchanged.</para>
 ///
-/// <para><b>DirectML requirements</b> (per the ORT DirectML EP docs): memory-pattern
-/// optimization must be disabled and the execution mode must be sequential, otherwise
-/// session creation fails. Those are applied only on the DirectML path.</para>
+/// <para><b>GPU history:</b> the first GPU path was DirectML; it was removed after
+/// benchmarks showed the DML EP produces garbage for these KV-cache merged-decoder
+/// exports on every GPU tested (docs/architecture.md §execution provider). CUDA
+/// (NVIDIA-only) replaced it. The CUDA/cuDNN runtime DLLs are not bundled — when
+/// they're missing, session creation throws and we fall back to CPU.</para>
 /// </summary>
 internal static class OnnxSessionFactory
 {
     /// <summary>Canonical provider strings.</summary>
     public const string Cpu = "cpu";
-    public const string DirectMl = "directml";
+    public const string Cuda = "cuda";
 
     /// <summary>
     /// Normalizes a user-supplied provider string to <see cref="Cpu"/> or
-    /// <see cref="DirectMl"/>. Accepts "cpu", "directml" and the "dml" alias
-    /// (case-insensitive); anything else falls back to CPU with a log line.
+    /// <see cref="Cuda"/>. Accepts "cpu", "cuda" and the "gpu" alias; the legacy
+    /// "directml"/"dml" values map to CUDA with a log line (the DML EP was removed
+    /// as broken — an old config asking for GPU still gets the working GPU path,
+    /// or the CPU fallback). Anything else falls back to CPU with a log line.
     /// </summary>
     public static string NormalizeProvider(string? provider, Action<string>? log = null)
     {
@@ -35,10 +39,14 @@ internal static class OnnxSessionFactory
         {
             case Cpu:
                 return Cpu;
-            case DirectMl:
-            case "dml":
+            case Cuda:
             case "gpu":
-                return DirectMl;
+                return Cuda;
+            case "directml":
+            case "dml":
+                log?.Invoke("[onnx] DirectML support was removed (broken for these models — " +
+                            "see docs/architecture.md); treating provider as 'cuda'.");
+                return Cuda;
             default:
                 log?.Invoke($"[onnx] Unknown execution provider '{provider}'; using cpu.");
                 return Cpu;
@@ -47,16 +55,16 @@ internal static class OnnxSessionFactory
 
     /// <summary>
     /// Creates the encoder and decoder sessions for a seq2seq model. When
-    /// <paramref name="executionProvider"/> resolves to DirectML this tries the GPU
-    /// first and, if DirectML initialization throws (no DX12 device, driver missing,
-    /// unsupported model), logs the reason and transparently falls back to CPU
-    /// sessions. The returned provider string is the one actually used.
+    /// <paramref name="executionProvider"/> resolves to CUDA this tries the GPU
+    /// first and, if CUDA initialization throws (no NVIDIA device, CUDA/cuDNN DLLs
+    /// missing), logs the reason and transparently falls back to CPU sessions. The
+    /// returned provider string is the one actually used.
     ///
     /// <para><paramref name="weightsAreQuantized"/> must be true when the model files
-    /// are int8 dynamically-quantized. int8 + DirectML is unsupported and, on at least
-    /// some drivers, causes a <b>native access violation that no managed try/catch can
-    /// intercept</b> (it kills the process). So when DirectML is requested with int8
-    /// weights we do NOT attempt it — we log and use CPU. Give DirectML fp32 weights.</para>
+    /// are int8 dynamically-quantized. int8 dynamic quantization is CPU-targeted —
+    /// on CUDA those ops just fall back to the CPU EP inside the session, paying
+    /// GPU transfer costs for nothing — so when a GPU is requested with int8
+    /// weights we log and use CPU. Give the GPU fp32 (or fp16) weights.</para>
     /// </summary>
     public static (InferenceSession encoder, InferenceSession decoder, string provider) CreateEncoderDecoder(
         string encoderPath, string decoderPath, string executionProvider, int gpuDeviceId,
@@ -64,38 +72,39 @@ internal static class OnnxSessionFactory
     {
         string requested = NormalizeProvider(executionProvider, log);
 
-        if (requested == DirectMl && weightsAreQuantized)
+        if (requested == Cuda && weightsAreQuantized)
         {
             log?.Invoke(
-                "[onnx] DirectML requested but only int8-quantized weights are present. " +
-                "int8 + DirectML is unsupported (can hard-crash the process); using CPU instead. " +
-                "Download fp32 weights to run on the GPU.");
+                "[onnx] CUDA requested but only int8-quantized weights are present. " +
+                "int8 dynamic quantization is CPU-targeted and gains nothing on the GPU; " +
+                "using CPU instead. Download fp32 weights to run on the GPU.");
             requested = Cpu;
         }
 
-        if (requested == DirectMl)
+        if (requested == Cuda)
         {
-            SessionOptions? dmlOptions = null;
+            SessionOptions? cudaOptions = null;
             InferenceSession? encoder = null;
             try
             {
-                dmlOptions = BuildDirectMlOptions(gpuDeviceId);
-                encoder = new InferenceSession(encoderPath, dmlOptions);
-                var decoder = new InferenceSession(decoderPath, dmlOptions);
-                log?.Invoke($"[onnx] Using DirectML execution provider (GPU device {gpuDeviceId}).");
-                return (encoder, decoder, DirectMl);
+                cudaOptions = BuildCudaOptions(gpuDeviceId);
+                encoder = new InferenceSession(encoderPath, cudaOptions);
+                var decoder = new InferenceSession(decoderPath, cudaOptions);
+                log?.Invoke($"[onnx] Using CUDA execution provider (GPU device {gpuDeviceId}).");
+                return (encoder, decoder, Cuda);
             }
             catch (Exception ex)
             {
                 encoder?.Dispose();
                 log?.Invoke(
-                    $"[onnx] DirectML init failed ({ex.GetType().Name}: {ex.Message.Trim()}); " +
-                    "falling back to CPU execution provider.");
+                    $"[onnx] CUDA init failed ({ex.GetType().Name}: {ex.Message.Trim()}); " +
+                    "falling back to CPU execution provider. CUDA needs an NVIDIA GPU and the " +
+                    "CUDA 12 / cuDNN 9 runtime DLLs beside the exe or on PATH.");
                 // fall through to the CPU path below
             }
             finally
             {
-                dmlOptions?.Dispose();
+                cudaOptions?.Dispose();
             }
         }
 
@@ -106,7 +115,7 @@ internal static class OnnxSessionFactory
     }
 
     /// <summary>
-    /// CPU session options — identical to the pre-DirectML engine code so CPU runs are
+    /// CPU session options — identical to the pre-GPU engine code so CPU runs are
     /// byte-for-byte unaffected: full graph optimization, bounded thread pools for
     /// deterministic snip-time latency.
     /// </summary>
@@ -122,21 +131,17 @@ internal static class OnnxSessionFactory
     }
 
     /// <summary>
-    /// DirectML session options. The DirectML EP mandates memory-pattern optimization
-    /// OFF and sequential execution mode; it also owns its own scheduling, so the CPU
-    /// thread-pool bounds are left at defaults. Graph optimization stays at
-    /// ORT_ENABLE_ALL (supported with DML).
+    /// CUDA session options. Graph optimization stays at ORT_ENABLE_ALL; the CPU
+    /// thread-pool bounds are left at defaults (the GPU owns the heavy work, and a
+    /// handful of shape/copy ops still run on the CPU EP).
     /// </summary>
-    private static SessionOptions BuildDirectMlOptions(int gpuDeviceId)
+    private static SessionOptions BuildCudaOptions(int gpuDeviceId)
     {
         var options = new SessionOptions
         {
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
         };
-        // Required by the DirectML execution provider.
-        options.EnableMemoryPattern = false;
-        options.ExecutionMode = ExecutionMode.ORT_SEQUENTIAL;
-        options.AppendExecutionProvider_DML(Math.Max(0, gpuDeviceId));
+        options.AppendExecutionProvider_CUDA(Math.Max(0, gpuDeviceId));
         return options;
     }
 }

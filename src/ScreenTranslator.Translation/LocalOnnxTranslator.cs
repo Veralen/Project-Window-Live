@@ -35,7 +35,7 @@ public sealed class LocalOnnxTranslator : ITranslator
     private readonly Action<string>? _log;
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    /// <summary>The execution provider actually in use after init ("cpu" or "directml"), or the requested one before.</summary>
+    /// <summary>The execution provider actually in use after init ("cpu" or "cuda"), or the requested one before.</summary>
     public string ActiveProvider { get; private set; } = OnnxSessionFactory.Cpu;
 
     private InferenceSession? _encoder;
@@ -87,12 +87,12 @@ public sealed class LocalOnnxTranslator : ITranslator
     /// </param>
     /// <param name="executionProvider">
     /// ONNX Runtime execution provider: <c>"cpu"</c> (default — the shipping behavior,
-    /// byte-for-byte unchanged) or <c>"directml"</c> to run on a DX12 GPU. Unknown
-    /// values fall back to CPU. If DirectML initialization fails at runtime the engine
+    /// byte-for-byte unchanged) or <c>"cuda"</c> to run on an NVIDIA GPU. Unknown
+    /// values fall back to CPU. If CUDA initialization fails at runtime the engine
     /// automatically falls back to CPU (see <see cref="OnnxSessionFactory"/>); check
     /// <see cref="ActiveProvider"/> after <see cref="InitializeAsync"/> for the result.
     /// </param>
-    /// <param name="gpuDeviceId">DirectML adapter index (default 0). Ignored on CPU.</param>
+    /// <param name="gpuDeviceId">CUDA device index (default 0). Ignored on CPU.</param>
     /// <param name="log">Optional sink for provider-selection / fallback log lines.</param>
     public LocalOnnxTranslator(string modelDirectory, bool preferQuantized = false, int? beamWidth = null,
         string executionProvider = "cpu", int gpuDeviceId = 0, Action<string>? log = null)
