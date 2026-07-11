@@ -20,7 +20,7 @@ public sealed class AppConfig
     public string TargetLanguage { get; set; } = "eng_Latn";
 
     /// <summary>Global hotkey, "Modifier+Modifier+Key" (modifiers: Ctrl, Alt, Shift, Win).</summary>
-    public string Hotkey { get; set; } = "Ctrl+Alt+T";
+    public string Hotkey { get; set; } = "Ctrl+Shift+L";
 
     /// <summary>Directory containing the translation model files. Relative paths resolve against %LOCALAPPDATA%\ScreenTranslator.</summary>
     public string ModelDirectory { get; set; } = "models";
