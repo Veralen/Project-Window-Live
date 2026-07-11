@@ -23,13 +23,15 @@ internal sealed class PipelineFactory
     public ITextBlockGrouper CreateGrouper() => new ProximityTextBlockGrouper();
 
     /// <summary>
-    /// Returns the configured ONNX translator when its model files are present,
-    /// otherwise an <see cref="EchoTranslator"/> so the pipeline stays usable
-    /// (labels rendered with a "[no model]" marker). Honors
-    /// <see cref="AppConfig.Engine"/> ("opus" default / "nllb") and passes the
+    /// Returns the configured translator, degrading along nllb → opus → echo so the
+    /// pipeline always stays usable (echo renders labels with a "[no model]" marker).
+    /// Honors <see cref="AppConfig.Engine"/> ("opus" default / "nllb" multilingual —
+    /// its direction comes from <see cref="AppConfig.SourceLanguage"/>/<see
+    /// cref="AppConfig.TargetLanguage"/>, FLORES-200 codes) and passes the
     /// execution-provider settings (<see cref="AppConfig.ExecutionProvider"/>,
     /// <see cref="AppConfig.GpuDeviceId"/>) through to the engine. Defaults are opus +
-    /// cpu, exactly as before. Run scripts/download-model.ps1 to install the model.
+    /// cpu, exactly as before. Run scripts/download-model.ps1 /
+    /// download-model-nllb.ps1 to install the models.
     /// </summary>
     public ITranslator CreateTranslator()
     {
@@ -42,15 +44,20 @@ internal sealed class PipelineFactory
             string nllbDir = _config.ResolveNllbModelDirectory();
             if (NllbModelPresent(nllbDir))
                 return new NllbOnnxTranslator(nllbDir, executionProvider: provider,
-                    gpuDeviceId: deviceId, log: AppLog.Write);
-            AppLog.Write($"[pipeline] NLLB model not found in '{nllbDir}'; using EchoTranslator.");
-            return new EchoTranslator();
+                    gpuDeviceId: deviceId, log: AppLog.Write,
+                    sourceLanguage: _config.SourceLanguage, targetLanguage: _config.TargetLanguage);
+            // The small model is the designed fallback when the big one is absent.
+            // Note it is a fixed zh→en pair — correct for the default config; with a
+            // non-Chinese SourceLanguage it degrades to visibly-wrong output, which
+            // still beats a dead pipeline (and the log/Settings panel say why).
+            AppLog.Write($"[pipeline] NLLB model not found in '{nllbDir}'; falling back to opus-mt (zh→en).");
         }
 
         string modelDir = _config.ResolveModelDirectory();
         if (OpusModelPresent(modelDir))
             return new LocalOnnxTranslator(modelDir, executionProvider: provider,
                 gpuDeviceId: deviceId, log: AppLog.Write);
+        AppLog.Write($"[pipeline] opus-mt model not found in '{modelDir}'; using EchoTranslator.");
         return new EchoTranslator();
     }
 

@@ -1,9 +1,8 @@
 <#
 .SYNOPSIS
-    Downloads the NLLB-200-distilled-600M ONNX translation model (int8) used ONLY
-    for the offline benchmark path in TranslatorCli (`--engine nllb`). This model is
-    NOT wired into the ScreenTranslator app; it exists so a shipping decision can be
-    made against the reference model named in the product design doc.
+    Downloads the NLLB-200-distilled-600M ONNX translation model — the app's
+    multilingual engine (config Engine = "nllb"; direction set by SourceLanguage/
+    TargetLanguage FLORES-200 codes). Also used by TranslatorCli's `--engine nllb`.
 
 .DESCRIPTION
     Model: facebook/nllb-200-distilled-600M, ONNX export published at Hugging Face

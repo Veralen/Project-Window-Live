@@ -3,16 +3,18 @@
 //   dotnet run --project tools/TranslatorCli -- "你好，世界"
 //   dotnet run --project tools/TranslatorCli -- --model-dir C:\path\to\models "设置" "文件"
 //   dotnet run --project tools/TranslatorCli -- --quantized "你好"       # force int8 weights
-//   dotnet run --project tools/TranslatorCli -- --engine nllb "你好"     # NLLB benchmark engine
+//   dotnet run --project tools/TranslatorCli -- --engine nllb "你好"     # NLLB multilingual engine
+//   dotnet run --project tools/TranslatorCli -- --engine nllb --src jpn_Jpan "こんにちは"
 //   dotnet run --project tools/TranslatorCli -- --beams 6 "你好"         # override beam width
 //
-// Flags: --model-dir <path>, --engine opus|nllb (default opus; nllb is BENCHMARK
-// ONLY and reads from the sibling models-nllb dir), --beams <n> (override beam
-// width; opus default is min(config,4)), --quantized/--int8 (force int8, opus only),
-// --fp32 (force fp32, the opus default), --ep cpu|directml (execution provider,
-// default cpu), --gpu (shorthand for --ep directml), --device <n> (DirectML adapter
-// index). Remaining args are translated in sequence. Prints each translation with
-// per-call timing. Exits non-zero with an actionable message when the model is missing.
+// Flags: --model-dir <path>, --engine opus|nllb (default opus; nllb is the
+// multilingual engine and reads from the sibling models-nllb dir), --src/--tgt
+// <FLORES-200 code> (nllb only; defaults zho_Hans/eng_Latn), --beams <n> (override
+// beam width; opus default is min(config,4)), --quantized/--int8 (force int8, opus
+// only), --fp32 (force fp32, the opus default), --ep cpu|directml (execution
+// provider, default cpu), --gpu (shorthand for --ep directml), --device <n>
+// (DirectML adapter index). Remaining args are translated in sequence. Prints each
+// translation with per-call timing. Exits non-zero when the model is missing.
 using System.Diagnostics;
 using ScreenTranslator.Core.Config;
 using ScreenTranslator.Core.Translation;
@@ -24,6 +26,8 @@ string engine = "opus";       // "opus" (default, app engine) or "nllb" (benchma
 int? beamWidth = null;        // null -> engine default (min(config, 4))
 string provider = "cpu";      // "cpu" (default) or "directml"
 int deviceId = 0;             // DirectML adapter index
+string srcLang = "zho_Hans";  // FLORES-200 source code (nllb only)
+string tgtLang = "eng_Latn";  // FLORES-200 target code (nllb only)
 var texts = new List<string>();
 
 for (int i = 0; i < args.Length; i++)
@@ -55,6 +59,12 @@ for (int i = 0; i < args.Length; i++)
         case "--device" when i + 1 < args.Length:
             deviceId = int.Parse(args[++i]);
             break;
+        case "--src" when i + 1 < args.Length:
+            srcLang = args[++i];
+            break;
+        case "--tgt" when i + 1 < args.Length:
+            tgtLang = args[++i];
+            break;
         default:
             texts.Add(args[i]);
             break;
@@ -67,8 +77,8 @@ if (engine != "opus" && engine != "nllb")
     return 2;
 }
 
-// opus-mt lives in the app's model dir; NLLB (benchmark only) lives beside it in
-// a sibling 'models-nllb' directory.
+// opus-mt lives in the app's model dir; NLLB lives beside it in a sibling
+// 'models-nllb' directory.
 if (modelDir is null)
 {
     string opusDir = new AppConfig().ResolveModelDirectory();
@@ -89,7 +99,7 @@ if (texts.Count == 0)
     Console.WriteLine("(no input given — running the built-in sample set)\n");
 }
 
-Console.WriteLine($"Engine: {(engine == "nllb" ? "NLLB-200-distilled-600M (BENCHMARK ONLY)" : "opus-mt-zh-en")}");
+Console.WriteLine($"Engine: {(engine == "nllb" ? $"NLLB-200-distilled-600M ({srcLang}→{tgtLang})" : "opus-mt-zh-en")}");
 Console.WriteLine($"Model directory: {modelDir}");
 if (engine == "opus")
     Console.WriteLine($"Weights: {(preferQuantized ? "quantized (int8)" : "full-precision (fp32)")}");
@@ -101,7 +111,8 @@ void Log(string line) => Console.Error.WriteLine(line);
 
 using ITranslator translator = engine == "nllb"
     ? (ITranslator)new NllbOnnxTranslator(modelDir, numBeams: beamWidth ?? 4,
-        executionProvider: provider, gpuDeviceId: deviceId, log: Log)
+        executionProvider: provider, gpuDeviceId: deviceId, log: Log,
+        sourceLanguage: srcLang, targetLanguage: tgtLang)
     : new LocalOnnxTranslator(modelDir, preferQuantized: preferQuantized, beamWidth: beamWidth,
         executionProvider: provider, gpuDeviceId: deviceId, log: Log);
 
@@ -110,8 +121,10 @@ try
 {
     await translator.InitializeAsync();
 }
-catch (FileNotFoundException ex)
+catch (Exception ex) when (ex is FileNotFoundException or InvalidOperationException)
 {
+    // Missing model files or an unknown FLORES-200 language code — both carry
+    // actionable messages; no stack trace needed.
     Console.Error.WriteLine("ERROR: " + ex.Message);
     return 2;
 }

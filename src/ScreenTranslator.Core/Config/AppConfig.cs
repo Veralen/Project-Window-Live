@@ -13,10 +13,15 @@ public sealed class AppConfig
     /// <summary>BCP-47 tag used to pick the Windows OCR engine (prefix-matched against installed packs).</summary>
     public string OcrLanguage { get; set; } = "zh-Hans";
 
-    /// <summary>Source language code understood by the translation model (NLLB/FLORES-style or model-specific).</summary>
+    /// <summary>
+    /// FLORES-200 source language code (e.g. "zho_Hans", "jpn_Jpan", "kor_Hang",
+    /// "fra_Latn"). Drives the NLLB engine's translation direction; the opus engine
+    /// is a fixed zh→en pair and ignores it. Keep <see cref="OcrLanguage"/> in sync
+    /// (the OCR pack for the same language must be installed).
+    /// </summary>
     public string SourceLanguage { get; set; } = "zho_Hans";
 
-    /// <summary>Target language code understood by the translation model.</summary>
+    /// <summary>FLORES-200 target language code. Drives the NLLB engine; opus ignores it.</summary>
     public string TargetLanguage { get; set; } = "eng_Latn";
 
     /// <summary>Global hotkey, "Modifier+Modifier+Key" (modifiers: Ctrl, Alt, Shift, Win).</summary>
@@ -26,10 +31,12 @@ public sealed class AppConfig
     public string ModelDirectory { get; set; } = "models";
 
     /// <summary>
-    /// Translation engine: <c>"opus"</c> (default; opus-mt-zh-en, the shipping engine)
-    /// or <c>"nllb"</c> (NLLB-200-distilled-600M, higher quality but far heavier — only
-    /// interactive on a capable GPU). NLLB reads from a sibling <c>models-nllb</c> dir.
-    /// Unknown values fall back to <c>"opus"</c>.
+    /// Translation engine: <c>"opus"</c> (default; opus-mt-zh-en, small and fast) or
+    /// <c>"nllb"</c> (NLLB-200-distilled-600M — multilingual via
+    /// <see cref="SourceLanguage"/>/<see cref="TargetLanguage"/>, higher quality, far
+    /// heavier). NLLB reads from a sibling <c>models-nllb</c> dir and degrades to
+    /// opus, then echo, when model files are missing. Unknown values fall back to
+    /// <c>"opus"</c>.
     /// </summary>
     public string Engine { get; set; } = "opus";
 

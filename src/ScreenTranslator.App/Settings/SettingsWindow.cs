@@ -125,7 +125,7 @@ internal sealed class SettingsWindow : Window
 
         _engineBox = MakeCombo(
             ("opus", "opus-mt zh→en (default, fast)"),
-            ("nllb", "NLLB-200 600M (higher quality, heavier)"));
+            ("nllb", "NLLB-200 600M (multilingual, heavier)"));
         root.Children.Add(MakeLabeledRow("Model", _engineBox));
 
         _providerBox = MakeCombo(

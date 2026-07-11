@@ -294,7 +294,8 @@ public partial class App : Application
                 "opus-mt zh→en", requested, t.ActiveProvider, t.IsReady, IsEcho: false,
                 _config.ResolveModelDirectory(), ocr.Language, ocr.Match, ocr.Fallback, _translatorInitError),
             NllbOnnxTranslator t => new Settings.TranslationStatus(
-                "NLLB-200-distilled-600M", requested, t.ActiveProvider, t.IsReady, IsEcho: false,
+                $"NLLB-200-distilled-600M ({t.SourceLanguage}→{t.TargetLanguage})",
+                requested, t.ActiveProvider, t.IsReady, IsEcho: false,
                 _config.ResolveNllbModelDirectory(), ocr.Language, ocr.Match, ocr.Fallback, _translatorInitError),
             _ => new Settings.TranslationStatus(
                 "none — model files not found (\"[no model]\" passthrough)", requested, "n/a",
