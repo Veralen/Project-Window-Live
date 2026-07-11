@@ -27,6 +27,7 @@ public partial class App : Application
     private ITranslator? _translator;
     private SnipController? _snip;
     private TaskbarIcon? _tray;
+    private Settings.SettingsWindow? _settingsWindow;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -80,6 +81,46 @@ public partial class App : Application
             Dispatcher.BeginInvoke(new Action(() => _snip!.BeginSnip(autoTest, explicitRegion)),
                 System.Windows.Threading.DispatcherPriority.ApplicationIdle);
         }
+
+        // --settings: open the Settings window immediately (smoke-test affordance).
+        if (e.Args.Any(a => string.Equals(a, "--settings", StringComparison.OrdinalIgnoreCase)))
+        {
+            Log("--settings requested; opening Settings window.");
+            Dispatcher.BeginInvoke(new Action(OpenSettings),
+                System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+        }
+    }
+
+    /// <summary>
+    /// Opens the Settings window (single instance — activates the existing one if
+    /// already open). Save live-re-registers the hotkey via <see cref="HotkeyManager.TryReplace"/>
+    /// and only persists on success; on success the current binding + a tray balloon update.
+    /// </summary>
+    private void OpenSettings()
+    {
+        if (_settingsWindow is not null)
+        {
+            _settingsWindow.Activate();
+            return;
+        }
+
+        var window = new Settings.SettingsWindow(_config, hotkey =>
+        {
+            bool ok = _hotkeys!.TryReplace(hotkey, out string error);
+            if (ok) Log($"Hotkey re-registered to '{hotkey}'.");
+            else Log($"Hotkey re-registration to '{hotkey}' failed: {error}");
+            return (ok, error);
+        });
+        window.Saved += hotkey =>
+        {
+            // _config.Hotkey is already updated by the window (same instance), so a
+            // later Settings open shows the current binding.
+            ShowBalloon("Shortcut updated", $"Shortcut updated to {Settings.HotkeyCaptureBox.ToDisplay(hotkey)}");
+        };
+        window.Closed += (_, _) => _settingsWindow = null;
+        _settingsWindow = window;
+        window.Show();
+        window.Activate();
     }
 
     private static string? GetArgValue(string[] args, string name)
@@ -113,6 +154,10 @@ public partial class App : Application
         var snipItem = new MenuItem { Header = "Snip & translate" };
         snipItem.Click += (_, _) => _snip!.BeginSnip(autoTest: false);
         menu.Items.Add(snipItem);
+
+        var settingsItem = new MenuItem { Header = "Settings…" };
+        settingsItem.Click += (_, _) => OpenSettings();
+        menu.Items.Add(settingsItem);
 
         menu.Items.Add(new Separator());
 

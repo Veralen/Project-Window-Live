@@ -149,4 +149,36 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    // ---- Virtual-key codes (main keyboard) used by the hotkey parser ----
+    // A-Z / 0-9 equal their ASCII value and F1-F24 are computed, so only the
+    // named/editing/navigation/OEM keys need explicit constants here.
+    public const uint VK_BACK = 0x08;
+    public const uint VK_TAB = 0x09;
+    public const uint VK_RETURN = 0x0D;
+    public const uint VK_ESCAPE = 0x1B;
+    public const uint VK_SPACE = 0x20;
+    public const uint VK_PRIOR = 0x21;  // Page Up
+    public const uint VK_NEXT = 0x22;   // Page Down
+    public const uint VK_END = 0x23;
+    public const uint VK_HOME = 0x24;
+    public const uint VK_LEFT = 0x25;
+    public const uint VK_UP = 0x26;
+    public const uint VK_RIGHT = 0x27;
+    public const uint VK_DOWN = 0x28;
+    public const uint VK_INSERT = 0x2D;
+    public const uint VK_DELETE = 0x2E;
+
+    // OEM punctuation keys with stable VK codes on a standard US layout.
+    public const uint VK_OEM_1 = 0xBA;      // ';:'
+    public const uint VK_OEM_PLUS = 0xBB;   // '=+'
+    public const uint VK_OEM_COMMA = 0xBC;  // ',<'
+    public const uint VK_OEM_MINUS = 0xBD;  // '-_'
+    public const uint VK_OEM_PERIOD = 0xBE; // '.>'
+    public const uint VK_OEM_2 = 0xBF;      // '/?'
+    public const uint VK_OEM_3 = 0xC0;      // '`~'
+    public const uint VK_OEM_4 = 0xDB;      // '[{'
+    public const uint VK_OEM_5 = 0xDC;      // '\|'
+    public const uint VK_OEM_6 = 0xDD;      // ']}'
+    public const uint VK_OEM_7 = 0xDE;      // '\'"'
 }
