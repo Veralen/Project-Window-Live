@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
@@ -16,6 +17,7 @@ using ScreenTranslator.App.Overlay;
 using ScreenTranslator.App.Pipeline;
 using ScreenTranslator.Core.Config;
 using ScreenTranslator.Core.Translation;
+using ScreenTranslator.Translation;
 
 namespace ScreenTranslator.App;
 
@@ -28,10 +30,24 @@ public partial class App : Application
 {
     private AppConfig _config = new();
     private HotkeyManager? _hotkeys;
+    private PipelineFactory? _factory;
     private ITranslator? _translator;
+    private Task _translatorReady = Task.CompletedTask;
     private SnipController? _snip;
     private TaskbarIcon? _tray;
     private Settings.SettingsWindow? _settingsWindow;
+
+    // Engines replaced via Settings that can't be disposed yet. An in-flight
+    // pipeline keeps using the engine it captured at start, and disposing an ONNX
+    // InferenceSession during a native Run — or while InitializeAsync is still
+    // building sessions on a thread-pool thread — risks a native crash or an
+    // orphaned native session. So each retired engine is parked with its init task
+    // and disposed only once that task completed AND no pipeline is in flight.
+    private readonly List<(ITranslator Translator, Task Ready)> _retiredTranslators = new();
+
+    // Message of the current engine's failed InitializeAsync, null while loading or
+    // when init succeeded. UI-thread only (init is awaited on the dispatcher context).
+    private string? _translatorInitError;
 
     // Single-instance guard. Held for the process lifetime so a second launch can
     // detect the running copy instead of failing silently (dead hotkey, extra
@@ -80,14 +96,14 @@ public partial class App : Application
             Dispatcher.Invoke(() => ShowBalloon(title, message));
 
         var ocr = new WindowsOcrService(_config.OcrLanguage, notify);
-        var factory = new PipelineFactory(_config);
-        _translator = factory.CreateTranslator();
+        _factory = new PipelineFactory(_config);
+        _translator = _factory.CreateTranslator();
         // Kick off model load once at startup; the snip pipeline awaits this
         // same task before its first translate so an early hotkey can't race
         // an uninitialized engine.
-        Task translatorReady = InitializeTranslatorAsync(_translator);
+        _translatorReady = InitializeTranslatorAsync(_translator);
 
-        _snip = new SnipController(_config, ocr, _translator, translatorReady, factory, notify);
+        _snip = new SnipController(_config, ocr, _translator, _translatorReady, _factory, notify);
 
         BuildTrayIcon();
 
@@ -153,7 +169,7 @@ public partial class App : Application
         if (ocrImage is not null)
         {
             Core.Geometry.PixelRect? crop = ParseCrop(GetArgValue(e.Args, "--crop"));
-            _ = RunOcrImageTestAsync(ocrImage, crop, ocr, factory, translatorReady);
+            _ = RunOcrImageTestAsync(ocrImage, crop, ocr, _factory, _translatorReady);
         }
     }
 
@@ -238,7 +254,7 @@ public partial class App : Application
             if (ok) Log($"Hotkey re-registered to '{hotkey}'.");
             else Log($"Hotkey re-registration to '{hotkey}' failed: {error}");
             return (ok, error);
-        });
+        }, GetTranslationStatus, ApplyTranslationSettings);
         window.Saved += hotkey =>
         {
             // _config.Hotkey is already updated by the window (same instance), so a
@@ -249,6 +265,90 @@ public partial class App : Application
         _settingsWindow = window;
         window.Show();
         window.Activate();
+    }
+
+    /// <summary>
+    /// Live snapshot for the Settings debug panel: which engine/model object is
+    /// active right now, whether it finished loading, the execution provider it
+    /// actually ended up on (DirectML can fall back to CPU), and whether an OCR
+    /// pack matching the configured language is installed.
+    /// </summary>
+    // Installed OCR packs don't change while the app runs (a new pack needs an app
+    // restart to matter), so the WinRT lookup is cached — the Settings status timer
+    // polls every second and must not enumerate recognizer languages each tick.
+    private (string Language, string? Match, string? Fallback)? _ocrLookupCache;
+
+    private Settings.TranslationStatus GetTranslationStatus()
+    {
+        string requested = _config.ResolveExecutionProvider();
+        if (_ocrLookupCache is not { } ocr || ocr.Language != _config.OcrLanguage)
+        {
+            string? match = WindowsOcrService.FindInstalledMatch(_config.OcrLanguage);
+            ocr = (_config.OcrLanguage, match, match is null ? WindowsOcrService.UserProfileEngineTag() : null);
+            _ocrLookupCache = ocr;
+        }
+
+        return _translator switch
+        {
+            LocalOnnxTranslator t => new Settings.TranslationStatus(
+                "opus-mt zh→en", requested, t.ActiveProvider, t.IsReady, IsEcho: false,
+                _config.ResolveModelDirectory(), ocr.Language, ocr.Match, ocr.Fallback, _translatorInitError),
+            NllbOnnxTranslator t => new Settings.TranslationStatus(
+                "NLLB-200-distilled-600M", requested, t.ActiveProvider, t.IsReady, IsEcho: false,
+                _config.ResolveNllbModelDirectory(), ocr.Language, ocr.Match, ocr.Fallback, _translatorInitError),
+            _ => new Settings.TranslationStatus(
+                "none — model files not found (\"[no model]\" passthrough)", requested, "n/a",
+                _translator?.IsReady ?? false, IsEcho: true, null,
+                ocr.Language, ocr.Match, ocr.Fallback, _translatorInitError),
+        };
+    }
+
+    /// <summary>
+    /// Rebuilds the translation engine after the Settings window changed
+    /// <see cref="AppConfig.Engine"/> / <see cref="AppConfig.ExecutionProvider"/>
+    /// (config is already persisted by the window). The new engine loads in the
+    /// background; the previous one is disposed immediately when idle, otherwise
+    /// parked in <see cref="_retiredTranslators"/> until pipelines drain.
+    /// </summary>
+    private void ApplyTranslationSettings()
+    {
+        DrainRetiredTranslators();
+
+        ITranslator? old = _translator;
+        Task oldReady = _translatorReady;
+        _translatorInitError = null;
+        _translator = _factory!.CreateTranslator();
+        _translatorReady = InitializeTranslatorAsync(_translator);
+        _snip!.ReplaceTranslator(_translator, _translatorReady);
+
+        if (old is not null)
+        {
+            // Dispose only an engine that is fully initialized AND unused: disposing
+            // mid-InitializeAsync races the thread-pool session build (orphaned
+            // native sessions), and disposing mid-translate risks a native crash.
+            if (oldReady.IsCompleted && !_snip.HasInFlightWork)
+                try { old.Dispose(); } catch (Exception ex) { Log($"[settings] Disposing old engine failed: {ex.Message}"); }
+            else
+                _retiredTranslators.Add((old, oldReady));
+        }
+
+        string engine = _config.ResolveEngine();
+        string provider = _config.ResolveExecutionProvider();
+        Log($"[settings] Translation engine rebuilt: engine={engine}, provider={provider}.");
+        ShowBalloon("Translation engine",
+            $"Switching to {(engine == "nllb" ? "NLLB-200 600M" : "opus-mt zh→en")} on " +
+            $"{(provider == "directml" ? "GPU (DirectML)" : "CPU")} — loading model…");
+    }
+
+    private void DrainRetiredTranslators()
+    {
+        if (_retiredTranslators.Count == 0 || (_snip?.HasInFlightWork ?? false)) return;
+        for (int i = _retiredTranslators.Count - 1; i >= 0; i--)
+        {
+            if (!_retiredTranslators[i].Ready.IsCompleted) continue; // still initializing
+            try { _retiredTranslators[i].Translator.Dispose(); } catch { /* best effort */ }
+            _retiredTranslators.RemoveAt(i);
+        }
     }
 
     private static string? GetArgValue(string[] args, string name)
@@ -269,10 +369,17 @@ public partial class App : Application
         return null;
     }
 
-    private static async System.Threading.Tasks.Task InitializeTranslatorAsync(ITranslator translator)
+    private async System.Threading.Tasks.Task InitializeTranslatorAsync(ITranslator translator)
     {
         try { await translator.InitializeAsync(); }
-        catch (Exception ex) { Log($"Translator init failed (using as-is): {ex.Message}"); }
+        catch (Exception ex)
+        {
+            Log($"Translator init failed (using as-is): {ex.Message}");
+            // Only surface the failure while this engine is still the current one —
+            // a stale init racing a Settings swap must not overwrite the new state.
+            if (ReferenceEquals(translator, _translator))
+                _translatorInitError = ex.Message;
+        }
     }
 
     private void BuildTrayIcon()
@@ -342,7 +449,18 @@ public partial class App : Application
     {
         _snip?.CloseAll();
         _hotkeys?.Dispose();
-        _translator?.Dispose();
+        // Skip disposing engines that are mid-init or mid-translate: the dispose
+        // would race native code (crash on exit), and the OS reclaims the memory
+        // anyway. Everything idle is released cleanly.
+        bool idle = !(_snip?.HasInFlightWork ?? false);
+        if (idle && _translatorReady.IsCompleted)
+            try { _translator?.Dispose(); } catch { /* process is exiting */ }
+        foreach (var (translator, ready) in _retiredTranslators)
+        {
+            if (!idle || !ready.IsCompleted) continue;
+            try { translator.Dispose(); } catch { /* process is exiting */ }
+        }
+        _retiredTranslators.Clear();
         _tray?.Dispose();
         if (_singleInstanceMutex is not null)
         {

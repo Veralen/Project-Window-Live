@@ -28,9 +28,10 @@ internal sealed class SnipController
 {
     private readonly AppConfig _config;
     private readonly IOcrService _ocr;
-    private readonly ITranslator _translator;
-    private readonly Task _translatorReady;
+    private ITranslator _translator;      // swappable via ReplaceTranslator (Settings)
+    private Task _translatorReady;
     private readonly PipelineFactory _factory;
+    private int _inFlightPipelines;
     private readonly WpfTextMeasurer _measurer = new();
     private readonly Action<string, string> _notify;
 
@@ -52,6 +53,21 @@ internal sealed class SnipController
     }
 
     public bool IsActive => _active;
+
+    /// <summary>True while any snip pipeline (OCR/translate/place) is still running.</summary>
+    public bool HasInFlightWork => Volatile.Read(ref _inFlightPipelines) > 0;
+
+    /// <summary>
+    /// Swaps in a new translation engine (Settings "toggle model" / provider change).
+    /// Pipelines already in flight keep the engine they started with — they capture
+    /// the pair at pipeline start — so the caller must not dispose the old engine
+    /// while <see cref="HasInFlightWork"/> is true. Call on the UI thread.
+    /// </summary>
+    public void ReplaceTranslator(ITranslator translator, Task translatorReady)
+    {
+        _translator = translator;
+        _translatorReady = translatorReady;
+    }
 
     /// <summary>When set, the overlay result is saved to this PNG path after rendering (test/demo).</summary>
     public string? SaveShotPath { get; set; }
@@ -191,6 +207,12 @@ internal sealed class SnipController
     {
         var frozen = _frozen!;
         PixelRect monitorWorkArea = overlay.Monitor.WorkArea;
+        // Capture the engine pair up front: a Settings-driven ReplaceTranslator
+        // mid-pipeline must not hand this run a half-initialized engine (and the
+        // in-flight counter keeps the captured engine from being disposed under us).
+        ITranslator translator = _translator;
+        Task translatorReady = _translatorReady;
+        Interlocked.Increment(ref _inFlightPipelines);
         try
         {
             var result = await Task.Run(async () =>
@@ -215,14 +237,14 @@ internal sealed class SnipController
                 sw.Restart();
                 // Ensure the model finished loading before the first translate
                 // (init runs from startup; an early snip could otherwise race it).
-                await _translatorReady.ConfigureAwait(false);
+                await translatorReady.ConfigureAwait(false);
                 var translated = new List<TranslatedBlock>(blocks.Count);
                 foreach (var block in blocks)
                 {
                     string t;
                     try
                     {
-                        t = await _translator.TranslateAsync(block.Text).ConfigureAwait(false);
+                        t = await translator.TranslateAsync(block.Text).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
@@ -270,6 +292,10 @@ internal sealed class SnipController
             Log($"[pipeline] ERROR: {ex}");
             overlay.HideTranslatingIndicator();
             _notify("Translation failed", ex.Message);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _inFlightPipelines);
         }
     }
 

@@ -54,11 +54,13 @@ internal sealed class PipelineFactory
         return new EchoTranslator();
     }
 
-    private static bool OpusModelPresent(string modelDir) =>
+    // Internal so the Settings debug panel can warn before the user commits to an
+    // engine whose model files aren't installed.
+    internal static bool OpusModelPresent(string modelDir) =>
         File.Exists(Path.Combine(modelDir, "encoder_model.onnx")) ||
         File.Exists(Path.Combine(modelDir, "encoder_model_quantized.onnx"));
 
-    private static bool NllbModelPresent(string modelDir) =>
+    internal static bool NllbModelPresent(string modelDir) =>
         File.Exists(Path.Combine(modelDir, "encoder_model.onnx")) ||
         File.Exists(Path.Combine(modelDir, "encoder_model_quantized.onnx"));
 }

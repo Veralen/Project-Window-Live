@@ -25,6 +25,7 @@ internal sealed class WindowsOcrService : IOcrService
 {
     private readonly string _configuredLanguage;
     private readonly Action<string, string> _notify; // (title, message)
+    private bool _fallbackNotified;
 
     public WindowsOcrService(string configuredLanguage, Action<string, string> notify)
     {
@@ -44,6 +45,19 @@ internal sealed class WindowsOcrService : IOcrService
         }
 
         string engineTag = engine.RecognizerLanguage.LanguageTag;
+
+        // A user-profile fallback engine in a language that doesn't match the
+        // configured one silently misreads the source text (e.g. en-US OCR over
+        // Chinese produces Latin garbage that then gets "translated"). Surface it
+        // once per session instead of failing quietly.
+        if (!_fallbackNotified && !Bcp47PrefixMatch(_configuredLanguage, engineTag))
+        {
+            _fallbackNotified = true;
+            _notify("OCR language pack missing",
+                $"No '{_configuredLanguage}' OCR pack is installed — using '{engineTag}' instead, " +
+                "so the snipped text will likely be misread. Run scripts/install-ocr-language.ps1 " +
+                "as administrator, then restart the app.");
+        }
 
         // Downscale for OCR if the crop exceeds MaxImageDimension; scale rects back after.
         int maxDim = (int)OcrEngine.MaxImageDimension;
@@ -91,6 +105,30 @@ internal sealed class WindowsOcrService : IOcrService
         }
 
         return new OcrRegionResult(lines, engineTag);
+    }
+
+    /// <summary>
+    /// Tag of the installed OCR pack that prefix-matches <paramref name="configured"/>,
+    /// or null when none does (the service would fall back to the user-profile engine).
+    /// Used by the Settings debug panel.
+    /// </summary>
+    internal static string? FindInstalledMatch(string configured)
+    {
+        try
+        {
+            foreach (var lang in OcrEngine.AvailableRecognizerLanguages)
+                if (Bcp47PrefixMatch(configured, lang.LanguageTag))
+                    return lang.LanguageTag;
+        }
+        catch { /* WinRT unavailable — treat as no match */ }
+        return null;
+    }
+
+    /// <summary>Tag of the user-profile fallback OCR engine, or null when none exists.</summary>
+    internal static string? UserProfileEngineTag()
+    {
+        try { return OcrEngine.TryCreateFromUserProfileLanguages()?.RecognizerLanguage.LanguageTag; }
+        catch { return null; }
     }
 
     private OcrEngine? ResolveEngine()
