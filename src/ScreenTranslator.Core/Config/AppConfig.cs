@@ -22,7 +22,7 @@ public sealed class AppConfig
     /// <summary>Global hotkey, "Modifier+Modifier+Key" (modifiers: Ctrl, Alt, Shift, Win).</summary>
     public string Hotkey { get; set; } = "Ctrl+Alt+T";
 
-    /// <summary>Directory containing the translation model files. Relative paths resolve against the app base directory.</summary>
+    /// <summary>Directory containing the translation model files. Relative paths resolve against %LOCALAPPDATA%\ScreenTranslator.</summary>
     public string ModelDirectory { get; set; } = "models";
 
     public static string DefaultPath =>
@@ -63,5 +63,6 @@ public sealed class AppConfig
     public string ResolveModelDirectory() =>
         Path.IsPathRooted(ModelDirectory)
             ? ModelDirectory
-            : Path.Combine(AppContext.BaseDirectory, ModelDirectory);
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ScreenTranslator", ModelDirectory);
 }
