@@ -103,3 +103,47 @@ Forked from ScreenTranslator (Project Window). Capture pipeline, overlay
 window infrastructure, drag-to-select region UI, and hotkey registration
 carry over. The ONNX translation engine, Windows.Media.Ocr, text block
 grouper, label placer, and language pack installer are all removed.
+
+## Status (2026-07-12)
+
+v1 is feature-complete and pushed to main. What's verified vs. pending:
+
+- **Snip mode: verified end-to-end** on real screen content via
+  `--snip-rect L,T,W,H --save-shot out.png` (correct translation chip
+  rendered below a live Spanish Notepad selection).
+- **Game mode: user-tested manually.** Two lifecycle bugs found and fixed
+  in that testing (panel Close-then-reuse crash; Show() skipped on
+  re-show). The final re-show fix (8d66915) was awaiting the user's live
+  in-game test at session end — ask before assuming it's confirmed.
+- Text quality at 0.8B accepted for v1. Known rough edges: hardest
+  profanity garbles rather than echoes now; "gehe afk" once mistranslated
+  ("afk" should pass through). Improving = few-shot iteration or a bigger
+  model tier (Qwen3.5-2B abliterated was discussed, not pursued).
+- If image/OCR accuracy disappoints on large regions: llama-server logs
+  suggest `--image-min-tokens 1024` (needs ctx headroom beyond 4096 —
+  weigh VRAM). Current approach (≤2x upscale, ~1 MP cap) is accurate on
+  chat-sized regions.
+
+Local-only artifacts (gitignored, needed to run/package):
+
+- `runtime/llama-cuda/` — llama.cpp b9966 CUDA build + cudart DLLs, server
+  exe duplicated as `llama-server-cuda.exe`. Re-download from ggml-org
+  llama.cpp releases if missing (`llama-*-bin-win-cuda-12.4-x64.zip` +
+  `cudart-llama-bin-win-cuda-12.4-x64.zip`).
+- `models/` — main GGUF (HF-cache layout) + mmproj, auto-downloaded on
+  first app run.
+- `dist/WindowLive/` — runnable package: `dotnet publish` output + llama
+  binaries + seeded models (~1.9 GB). README has the packaging steps.
+
+Testing workflow that worked well:
+
+- Hands-off e2e: launch the exe with `--snip-rect` + `--save-shot`, then
+  inspect the PNG. Game mode has no equivalent yet — adding
+  `--game-rect L,T,W,H` was offered and would remove the manual-drag
+  round-trips; implement it before debugging game mode again.
+- Prompt/model experiments: run llama-server standalone from
+  `runtime/llama-cuda/` and curl `/completion` (text) or
+  `/v1/chat/completions` (image transcription). Kill it before launching
+  the app — both want port 8420.
+- App log: `%LOCALAPPDATA%\WindowLive\logs\app-YYYYMMDD.log` — first stop
+  for every user-reported bug this session; stack traces land there.
