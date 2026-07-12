@@ -313,7 +313,11 @@ internal static class NativeMethods
         void GetDesc();
         void CheckInterfaceSupport();
 
-        // IDXGIAdapter1 — the only member actually called.
+        // IDXGIAdapter1 — the only member actually called. PreserveSig is
+        // required: without it the CLR appends a phantom retval out-param
+        // (corrupting the native call) and converts failure HRESULTs into
+        // COMExceptions instead of returning them for the caller to inspect.
+        [PreserveSig]
         int GetDesc1(out DXGI_ADAPTER_DESC1 pDesc);
     }
 
@@ -337,6 +341,10 @@ internal static class NativeMethods
         void CreateSoftwareAdapter();
 
         // IDXGIFactory1 — EnumAdapters1 is the only member actually called.
+        // PreserveSig is required (see GetDesc1): EnumAdapters1 returns
+        // DXGI_ERROR_NOT_FOUND as its normal end-of-enumeration signal, which
+        // must reach the caller as a return code, never as a COMException.
+        [PreserveSig]
         int EnumAdapters1(uint Adapter, out IDXGIAdapter1 ppAdapter);
         [return: MarshalAs(UnmanagedType.Bool)]
         bool IsCurrent();

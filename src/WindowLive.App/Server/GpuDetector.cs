@@ -59,7 +59,16 @@ internal static class GpuDetector
             uint index = 0;
             while (true)
             {
-                int hrEnum = factory.EnumAdapters1(index, out NativeMethods.IDXGIAdapter1 adapter);
+                int hrEnum;
+                NativeMethods.IDXGIAdapter1 adapter;
+                try
+                {
+                    hrEnum = factory.EnumAdapters1(index, out adapter);
+                }
+                catch (COMException ex) when (ex.HResult == DXGI_ERROR_NOT_FOUND)
+                {
+                    break; // end-of-list surfaced as an exception (interop safety net)
+                }
                 if (hrEnum == DXGI_ERROR_NOT_FOUND)
                     break; // normal end-of-list
                 if (hrEnum != 0 || adapter is null)

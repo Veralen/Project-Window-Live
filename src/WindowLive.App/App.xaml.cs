@@ -202,6 +202,20 @@ public partial class App : Application
             Shutdown();
             return false;
         }
+        catch (Exception ex)
+        {
+            // Anything unexpected out of DXGI/interop must still end in a clean
+            // shutdown — a startup that limps on with no backend leaves the tray
+            // alive but every dependent field null (zombie state).
+            Log($"[fatal] GPU detection failed unexpectedly: {ex}");
+            MessageBox.Show(
+                "WindowLive could not detect your GPU and cannot start.\n\nDetails: " + ex.Message +
+                $"\n\nLog: {AppLog.LogPath}",
+                "WindowLive — GPU detection failed",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            Shutdown();
+            return false;
+        }
 
         _httpClient = new HttpClient();
         _llmClient = new LlamaClient(_httpClient, _config);
@@ -303,7 +317,11 @@ public partial class App : Application
 
         var window = new Settings.SettingsWindow(_config, (slot, hotkey) =>
         {
-            bool ok = _hotkeys!.TryReplace(slot, hotkey, out string error);
+            // _hotkeys is created late in OnStartup; it is null if startup is
+            // still in flight or aborted. Fail the re-bind gracefully — never NRE.
+            if (_hotkeys is null)
+                return (false, "WindowLive is still starting up (or startup failed) — try again in a moment.");
+            bool ok = _hotkeys.TryReplace(slot, hotkey, out string error);
             if (ok) Log($"Hotkey '{slot}' re-registered to '{hotkey}'.");
             else Log($"Hotkey '{slot}' re-registration to '{hotkey}' failed: {error}");
             return (ok, error);
