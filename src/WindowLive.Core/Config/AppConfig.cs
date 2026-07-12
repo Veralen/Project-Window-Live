@@ -57,6 +57,13 @@ public sealed class AppConfig
     /// </summary>
     public PixelRect GameChatRegion { get; set; } = new PixelRect(0, 0, 0, 0);
 
+    /// <summary>
+    /// Saved translation-panel rect — physical pixels, virtual-screen coordinates.
+    /// Zero-sized until the user has moved or resized the panel once; while unset
+    /// (or no longer on any monitor) the panel auto-places below the chat region.
+    /// </summary>
+    public PixelRect GamePanelRect { get; set; } = new PixelRect(0, 0, 0, 0);
+
     public static string DefaultPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "WindowLive", "config.json");

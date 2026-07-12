@@ -147,12 +147,11 @@ public sealed class LlamaClient
     /// <summary>
     /// Streams the English translation of a screenshot crop via the two-step
     /// pipeline (class doc "WHY THE IMAGE PATH IS TWO STEPS"): transcribe the
-    /// image first, then stream each transcribed line's translation through the
-    /// same /completion path <see cref="StreamTextTranslationAsync"/> uses,
-    /// yielding a bare "\n" between lines so callers can tell them apart in the
-    /// streamed output. Completes without yielding anything if the transcript is
-    /// empty — a valid outcome (design doc "Error handling": no text / blank
-    /// result shows nothing), not an error.
+    /// image first (<see cref="TranscribeImageAsync"/>), then delegate to
+    /// <see cref="StreamTranscriptTranslationAsync"/> for the per-line
+    /// translation streaming. Completes without yielding anything if the
+    /// transcript is empty — a valid outcome (design doc "Error handling": no
+    /// text / blank result shows nothing), not an error.
     /// </summary>
     public async IAsyncEnumerable<string> StreamImageTranslationAsync(
         byte[] pngBytes, [EnumeratorCancellation] CancellationToken ct = default)
@@ -162,6 +161,29 @@ public sealed class LlamaClient
         string transcript = await TranscribeImageAsync(pngBytes, ct).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(transcript))
             yield break;
+
+        await foreach (string fragment in StreamTranscriptTranslationAsync(transcript, ct).ConfigureAwait(false))
+            yield return fragment;
+    }
+
+    /// <summary>
+    /// Streams the English translation of an already-transcribed multi-line
+    /// transcript (game mode's path once it has its own transcript-change
+    /// dedup — see <see cref="WindowLive.App.GameMode.GameModeController"/>):
+    /// splits into non-empty trimmed lines and streams each line's translation
+    /// through the same /completion path <see cref="StreamTextTranslationAsync"/>
+    /// uses, yielding a bare "\n" between lines so callers can tell them apart in
+    /// the streamed output. Completes without yielding anything if every line is
+    /// blank — a valid outcome, not an error. Extracted verbatim from what used
+    /// to be the second half of <see cref="StreamImageTranslationAsync"/> — no
+    /// behavior change for that caller (or for
+    /// <see cref="WindowLive.App.Overlay.SnipController"/>, which only calls
+    /// <see cref="StreamImageTranslationAsync"/>).
+    /// </summary>
+    public async IAsyncEnumerable<string> StreamTranscriptTranslationAsync(
+        string transcript, [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(transcript);
 
         var lines = new List<string>();
         foreach (string rawLine in transcript.Split('\n'))

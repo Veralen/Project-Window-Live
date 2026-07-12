@@ -111,10 +111,26 @@ v1 is feature-complete and pushed to main. What's verified vs. pending:
 - **Snip mode: verified end-to-end** on real screen content via
   `--snip-rect L,T,W,H --save-shot out.png` (correct translation chip
   rendered below a live Spanish Notepad selection).
-- **Game mode: user-tested manually.** Two lifecycle bugs found and fixed
-  in that testing (panel Close-then-reuse crash; Show() skipped on
-  re-show). The final re-show fix (8d66915) was awaiting the user's live
-  in-game test at session end — ask before assuming it's confirmed.
+- **Game mode: reworked after the first live in-game test.** That test
+  surfaced (a) update starvation — the old FNV-hash gate required two
+  bit-identical frames, which a live game never produces (translations
+  only appeared when snip mode's frozen overlay covered the region) — and
+  (b) an immovable panel. Fixes: `FrameSignature` (noise-tolerant
+  luminance-grid comparison, strict for change-vs-last-sent, tolerant for
+  stability) + `FrameGate` force-send backstop (~1.8s worst case under
+  constant motion) + transcript-level dedup in `GameModeController` (a
+  forced refresh skips translation and leaves the panel untouched when
+  the transcribed text is unchanged; `_lastTranscript` commits only after
+  a fully streamed translation so failures self-heal). The panel is now a
+  normal always-draggable/resizable window (WM_NCHITTEST hook: interior
+  drag, edge resize; WS_EX_NOACTIVATE keeps game keyboard focus; NOT
+  click-through anymore — user decision) whose rect persists to
+  `AppConfig.GamePanelRect` on WM_EXITSIZEMOVE and is reused on every
+  ShowFor. All of this awaits the user's second live in-game test — ask
+  before assuming it's confirmed.
+- Gate thresholds (`FrameGate.ChangeLevelTolerance` etc.) are educated
+  defaults validated by unit tests, not against a real game background —
+  if updates are still too eager/lazy live, tune those consts first.
 - Text quality at 0.8B accepted for v1. Known rough edges: hardest
   profanity garbles rather than echoes now; "gehe afk" once mistranslated
   ("afk" should pass through). Improving = few-shot iteration or a bigger
@@ -138,9 +154,15 @@ Local-only artifacts (gitignored, needed to run/package):
 Testing workflow that worked well:
 
 - Hands-off e2e: launch the exe with `--snip-rect` + `--save-shot`, then
-  inspect the PNG. Game mode has no equivalent yet — adding
-  `--game-rect L,T,W,H` was offered and would remove the manual-drag
-  round-trips; implement it before debugging game mode again.
+  inspect the PNG. Game mode: `--game-rect L,T,W,H` starts polling on an
+  explicit rect with no drag-to-select (transient — doesn't touch saved
+  config); point it at a positioned Notepad and watch the app log for
+  gate sends / "transcript unchanged" dedup lines.
+- Running the Debug-build exe directly needs
+  `$env:DOTNET_ROOT = "$env:LOCALAPPDATA\Microsoft\dotnet"` first (the
+  user-local .NET install isn't found by the apphost otherwise — the app
+  silently shows an "install .NET" dialog and never logs). The dist
+  build is self-contained and unaffected.
 - Prompt/model experiments: run llama-server standalone from
   `runtime/llama-cuda/` and curl `/completion` (text) or
   `/v1/chat/completions` (image transcription). Kill it before launching

@@ -136,10 +136,12 @@ internal static class NativeMethods
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
         int X, int Y, int cx, int cy, uint uFlags);
 
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
     // ---- Extended window styles (used by GameMode's persistent panel to stay
-    // click-through and never take keyboard focus from the game underneath) ----
+    // non-activating and never take keyboard focus from the game underneath) ----
     public const int GWL_EXSTYLE = -20;
-    public const int WS_EX_TRANSPARENT = 0x00000020; // click-through: input passes to the window behind
     public const int WS_EX_TOOLWINDOW = 0x00000080;  // no taskbar/alt-tab entry
     public const int WS_EX_NOACTIVATE = 0x08000000;  // never receives keyboard focus/activation
 
@@ -148,6 +150,35 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    // ---- Window messages (used by GamePanelWindow's WndProc hook to implement
+    // custom hit-testing for drag/resize and to persist the user-sized rect) ----
+    public const int WM_NCHITTEST = 0x0084;
+    public const int WM_ENTERSIZEMOVE = 0x0231;
+    public const int WM_EXITSIZEMOVE = 0x0232;
+    public const int WM_GETMINMAXINFO = 0x0024;
+
+    // ---- WM_NCHITTEST return codes ----
+    public const int HTCLIENT = 1;
+    public const int HTCAPTION = 2;
+    public const int HTLEFT = 10;
+    public const int HTRIGHT = 11;
+    public const int HTTOP = 12;
+    public const int HTTOPLEFT = 13;
+    public const int HTTOPRIGHT = 14;
+    public const int HTBOTTOM = 15;
+    public const int HTBOTTOMLEFT = 16;
+    public const int HTBOTTOMRIGHT = 17;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MINMAXINFO
+    {
+        public POINT ptReserved;
+        public POINT ptMaxSize;
+        public POINT ptMaxPosition;
+        public POINT ptMinTrackSize;
+        public POINT ptMaxTrackSize;
+    }
 
     // ---- Hotkeys ----
     public const int WM_HOTKEY = 0x0312;

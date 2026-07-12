@@ -172,6 +172,17 @@ public partial class App : Application
                 DispatcherPriority.ApplicationIdle);
         }
 
+        // --game-rect L,T,W,H : deterministically start game mode polling on an
+        // explicit virtual-screen physical-px rectangle, skipping the
+        // drag-to-select UI (mirrors --snip-rect; for testing/demos).
+        Core.Geometry.PixelRect? explicitGameRegion = ParseGameRect(e.Args);
+        if (explicitGameRegion is not null)
+        {
+            Log($"--game-rect requested: {explicitGameRegion} — skipping drag-to-select UI.");
+            Dispatcher.BeginInvoke(new Action(() => _gameMode!.StartForDebugRect(explicitGameRegion.Value)),
+                DispatcherPriority.ApplicationIdle);
+        }
+
         // --settings: open the Settings window immediately (smoke-test affordance).
         if (e.Args.Any(a => string.Equals(a, "--settings", StringComparison.OrdinalIgnoreCase)))
         {
@@ -349,6 +360,18 @@ public partial class App : Application
     private static Core.Geometry.PixelRect? ParseSnipRect(string[] args)
     {
         int i = Array.FindIndex(args, a => string.Equals(a, "--snip-rect", StringComparison.OrdinalIgnoreCase));
+        if (i < 0 || i + 1 >= args.Length) return null;
+        string[] p = args[i + 1].Split(',', StringSplitOptions.TrimEntries);
+        if (p.Length != 4) return null;
+        if (double.TryParse(p[0], out double l) && double.TryParse(p[1], out double t) &&
+            double.TryParse(p[2], out double w) && double.TryParse(p[3], out double h))
+            return new Core.Geometry.PixelRect(l, t, w, h);
+        return null;
+    }
+
+    private static Core.Geometry.PixelRect? ParseGameRect(string[] args)
+    {
+        int i = Array.FindIndex(args, a => string.Equals(a, "--game-rect", StringComparison.OrdinalIgnoreCase));
         if (i < 0 || i + 1 >= args.Length) return null;
         string[] p = args[i + 1].Split(',', StringSplitOptions.TrimEntries);
         if (p.Length != 4) return null;

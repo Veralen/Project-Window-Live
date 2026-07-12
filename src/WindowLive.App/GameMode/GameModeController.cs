@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,9 +20,17 @@ namespace WindowLive.App.GameMode;
 /// the hotkey-triggered region setup/redefine flow (reusing
 /// <see cref="OverlaySetup"/>/<see cref="OverlayWindow"/> — the same
 /// capture-first, drag-to-select machinery as the desktop snip pipeline), the
-/// background poll/capture/hash/translate loop, and the persistent
+/// background poll/capture/translate loop, and the persistent
 /// <see cref="GamePanelWindow"/> that shows the streamed result. Pause/Resume
 /// and Stop are exposed for the tray menu.
+///
+/// Change detection uses <see cref="FrameSignature"/>/<see cref="FrameGate"/>
+/// (noise-tolerant per-cell luminance signatures), not exact byte hashing: a
+/// live game never repeats bit-identically, so hashing raw bytes starved the
+/// gate forever. On top of that, a transcript-level dedup
+/// (<see cref="_lastTranscript"/>) skips re-translating when the model
+/// transcribes the same on-screen text from two different (visually
+/// noisy-but-unchanged) frames.
 ///
 /// Panel update choice: the design doc says "previous translation replaced
 /// when new one completes." This implementation instead clears the panel on
@@ -51,6 +60,15 @@ internal sealed class GameModeController
     private int _inFlight;
     private volatile bool _paused;
     private PixelRect _region;
+
+    /// <summary>
+    /// Last normalized transcript actually sent for translation. Used to skip
+    /// redundant translation calls when the model transcribes the same text
+    /// twice in a row (e.g. across two visually-noisy-but-textually-identical
+    /// frames). Reset only in <see cref="StartPolling"/> — NOT on a paused
+    /// resume, since pausing doesn't change what is on screen.
+    /// </summary>
+    private string? _lastTranscript;
 
     public GameModeController(AppConfig config, LlamaClient llm, ServerReadiness readiness, Action<string, string> notify)
     {
@@ -160,11 +178,12 @@ internal sealed class GameModeController
     {
         _region = region;
         _gate.Reset();
+        _lastTranscript = null;
         _paused = false;
 
         if (_panel is null)
         {
-            var panel = new GamePanelWindow();
+            var panel = new GamePanelWindow(_config);
             // Safety net: if the window is ever closed through any path (WPF
             // shutdown, an unexpected Close), drop the reference so the next
             // start builds a fresh instance instead of re-showing a dead one.
@@ -184,6 +203,23 @@ internal sealed class GameModeController
         _loopCts = null;
         _loopTask = null;
         _panel?.HidePanel();
+    }
+
+    /// <summary>
+    /// Debug/test affordance mirroring App's <c>--snip-rect</c>: starts polling
+    /// directly on an explicit virtual-screen physical-px rectangle, skipping
+    /// the drag-to-select UI entirely. Transient — unlike
+    /// <see cref="OnRegionSelected"/>, this does NOT save to
+    /// <see cref="AppConfig.GameChatRegion"/>.
+    /// </summary>
+    public void StartForDebugRect(PixelRect region)
+    {
+        if (IsRunning)
+            StopPolling();
+
+        var monitors = MonitorInfo.EnumerateAll();
+        MonitorInfo monitor = MonitorInfo.ForPoint(monitors, region.Center);
+        StartPolling(region, monitor);
     }
 
     /// <summary>Toggles pause; resuming re-arms <see cref="FrameGate"/> (design doc: "FrameGate.Reset() on region redefinition and resume").</summary>
@@ -257,8 +293,8 @@ internal sealed class GameModeController
             return;
         }
 
-        ulong hash = FrameHasher.Hash(captured.PixelsBgra32);
-        if (_gate.Observe(hash) != FrameAction.Send)
+        FrameSignature signature = FrameSignature.Compute(captured.PixelsBgra32, captured.PixelWidth, captured.PixelHeight);
+        if (_gate.Observe(signature) != FrameAction.Send)
             return;
 
         if (!_readiness.IsReady)
@@ -282,10 +318,27 @@ internal sealed class GameModeController
         try
         {
             byte[] png = ImageUpscaler.EncodeUpscaledPng(captured);
+            string transcript = await _llm.TranscribeImageAsync(png, requestCts.Token).ConfigureAwait(false);
+
+            string normalized = NormalizeTranscript(transcript);
+            if (normalized.Length == 0)
+                return; // Nothing legible transcribed — leave the panel untouched.
+
+            if (string.Equals(normalized, _lastTranscript, StringComparison.Ordinal))
+            {
+                // Same on-screen text as last time we translated — skip the
+                // redundant call. Length only: never log transcript content.
+                AppLog.Write($"[GameMode] transcript unchanged ({normalized.Length} chars) — skipping translation.");
+                return;
+            }
+
             bool started = false;
             var sb = new StringBuilder();
 
-            await foreach (string fragment in _llm.StreamImageTranslationAsync(png, requestCts.Token).ConfigureAwait(false))
+            // Raw (non-normalized) transcript: StreamTranscriptTranslationAsync
+            // does its own line-split/trim; normalized is only for the equality
+            // check above.
+            await foreach (string fragment in _llm.StreamTranscriptTranslationAsync(transcript, requestCts.Token).ConfigureAwait(false))
             {
                 if (!started)
                 {
@@ -297,6 +350,11 @@ internal sealed class GameModeController
                 string frag = fragment;
                 await RunOnUiAsync(() => _panel?.AppendText(frag)).ConfigureAwait(false);
             }
+
+            // Commit only after the full translation streamed. Committing before
+            // would let a mid-stream failure mark this text as "done", making a
+            // later forced refresh dedup-skip it and never show its translation.
+            _lastTranscript = normalized;
 
             if (started && sb.ToString().Trim().Length == 0)
             {
@@ -326,6 +384,10 @@ internal sealed class GameModeController
             Interlocked.Exchange(ref _inFlight, 0);
         }
     }
+
+    /// <summary>Trims each line, drops empty lines, and rejoins with "\n" — used only for the transcript-unchanged equality check, never logged or displayed verbatim.</summary>
+    private static string NormalizeTranscript(string transcript) =>
+        string.Join('\n', transcript.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0));
 
     private static Task RunOnUiAsync(Action action)
     {
