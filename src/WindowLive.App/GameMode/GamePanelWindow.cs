@@ -120,8 +120,13 @@ internal sealed class GamePanelWindow : Window
         {
             helper.EnsureHandle();
             PlaceWindow(helper.Handle, (int)Math.Round(placement.Height));
-            Show();
         }
+        // Show() must run on every re-show, not only on first handle creation:
+        // HidePanel() hides via WPF (Visibility = Hidden) and the handle survives,
+        // so SetWindowPos alone cannot bring the window back — WPF still considers
+        // itself hidden and the panel stays invisible while the loop translates.
+        if (!IsVisible)
+            Show();
         PlaceWindow(helper.Handle, (int)Math.Round(placement.Height));
     }
 
