@@ -76,7 +76,8 @@ llama-server.exe
   --hf-repo mradermacher/Huihui-Qwen3.5-0.8B-abliterated-GGUF
   --hf-file Huihui-Qwen3.5-0.8B-abliterated.Q4_K_S.gguf
   --mmproj models/Huihui-Qwen3.5-0.8B-abliterated.mmproj-Q8_0.gguf
-  --ctx-size 512
+  --ctx-size 4096
+  --parallel 2
   --port 8420
   -ngl 99          (all layers on GPU)
   --reasoning-budget 0   (belt-and-braces thinking suppression — server-wide,
@@ -90,9 +91,13 @@ main GGUF — download `Huihui-Qwen3.5-0.8B-abliterated.mmproj-Q8_0.gguf`
 (~0.2 GB) from the same repo on first run and pass it via `--mmproj`.
 Without it llama-server runs text-only and image requests fail.
 
-`--ctx-size 512` is intentional — each translation is a fresh stateless call,
-no conversation history, so a tiny context saves VRAM and keeps the KV cache
-allocation negligible.
+`--ctx-size 4096` (revised 2026-07-12 from the original 512): every call is
+still a fresh stateless request with no conversation history, but image
+transcription is part of every translation and a realistic snip or chat
+region costs ~1000 image tokens — at ctx 512 the server returned live
+400 exceed_context_size_error failures. `--parallel 2` (instead of the
+default 4 slots) keeps the KV allocation modest; ImageUpscaler additionally
+caps encoded image area at ~1.0 MP so worst-case image tokens stay ~1000.
 
 App must show a first-run progress UI during model download. Do not silently
 hang. Surface download progress from llama-server stdout.

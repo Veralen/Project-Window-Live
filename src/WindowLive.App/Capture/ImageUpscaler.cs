@@ -20,13 +20,25 @@ namespace WindowLive.App.Capture;
 /// </summary>
 internal static class ImageUpscaler
 {
-    private const int UpscaleFactor = 2;
+    private const double UpscaleFactor = 2.0;
 
     /// <summary>
-    /// Upscales <paramref name="region"/> 2x with high-quality bicubic
-    /// interpolation and PNG-encodes the result. All intermediate GDI+ objects
-    /// (source/scaled bitmaps, the drawing surface) are disposed before
-    /// returning; nothing touches disk.
+    /// Ceiling on the pixel area of the encoded image. Vision-token cost scales
+    /// with pixel area (~1 token per ~1000 px² observed with this model's mmproj),
+    /// and the llama-server context is finite — an unbounded 2x upscale of a large
+    /// snip produced 1200+ image tokens and a 400 exceed_context_size_error from
+    /// the server. ~1.0 MP keeps worst-case image tokens near ~1000, safely inside
+    /// a 2048-token slot alongside the instruction and generation budget.
+    /// </summary>
+    private const double MaxOutputPixels = 1_000_000;
+
+    /// <summary>
+    /// Upscales <paramref name="region"/> up to 2x with high-quality bicubic
+    /// interpolation — reduced proportionally so the output never exceeds
+    /// <see cref="MaxOutputPixels"/> (large regions may get no upscale at all) —
+    /// and PNG-encodes the result. All intermediate GDI+ objects (source/scaled
+    /// bitmaps, the drawing surface) are disposed before returning; nothing
+    /// touches disk.
     /// </summary>
     public static byte[] EncodeUpscaledPng(CapturedRegion region)
     {
@@ -40,8 +52,11 @@ internal static class ImageUpscaler
             using var source = new Bitmap(
                 region.PixelWidth, region.PixelHeight, stride, PixelFormat.Format32bppArgb, handle.AddrOfPinnedObject());
 
-            int scaledWidth = region.PixelWidth * UpscaleFactor;
-            int scaledHeight = region.PixelHeight * UpscaleFactor;
+            double area = (double)region.PixelWidth * region.PixelHeight;
+            double scale = Math.Min(UpscaleFactor, Math.Sqrt(MaxOutputPixels / area));
+            scale = Math.Max(scale, 1.0); // never downscale below the captured size
+            int scaledWidth = Math.Max(1, (int)Math.Round(region.PixelWidth * scale));
+            int scaledHeight = Math.Max(1, (int)Math.Round(region.PixelHeight * scale));
             using var scaled = new Bitmap(scaledWidth, scaledHeight, PixelFormat.Format32bppArgb);
             using (var g = Graphics.FromImage(scaled))
             {

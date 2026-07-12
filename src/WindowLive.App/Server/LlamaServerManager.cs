@@ -115,8 +115,15 @@ internal sealed class LlamaServerManager : IDisposable
             psi.ArgumentList.Add(mmprojLocalPath);
             psi.ArgumentList.Add("--no-mmproj-auto"); // we already resolved it ourselves; don't race llama-server's own auto-fetch
         }
+        // 4096 (not the original 512): image transcription is part of every
+        // translation now, and a realistic snip/chat region costs ~1000 image
+        // tokens (live 400 exceed_context_size_error at ctx 512 with a 569x521
+        // snip). --parallel 2 bounds the slot count (default 4) so the KV
+        // allocation stays modest; two slots cover snip + game mode overlapping.
         psi.ArgumentList.Add("--ctx-size");
-        psi.ArgumentList.Add("512");
+        psi.ArgumentList.Add("4096");
+        psi.ArgumentList.Add("--parallel");
+        psi.ArgumentList.Add("2");
         psi.ArgumentList.Add("--port");
         psi.ArgumentList.Add(_config.ServerPort.ToString(CultureInfo.InvariantCulture));
         psi.ArgumentList.Add("-ngl");

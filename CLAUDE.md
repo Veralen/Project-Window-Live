@@ -55,7 +55,13 @@ before coding anything.
   (tested 2026-07-12) — at 1x the model misreads on-screen text, at 2x it
   reads correctly. In-memory only, via the shared
   `WindowLive.App.Capture.ImageUpscaler` helper.
-- **ctx-size 512.** Each call is stateless; a tiny context saves VRAM.
+- **ctx-size 4096, --parallel 2** (revised 2026-07-12 from 512). Image
+  transcription rides along on every translation and a realistic snip or
+  chat region costs ~1000 image tokens — ctx 512 caused live 400
+  exceed_context_size_error failures. Calls are still stateless; --parallel 2
+  (instead of the default 4 slots) keeps the KV allocation modest. Image
+  area is additionally capped at ~1.0 MP in ImageUpscaler so worst-case
+  image tokens stay near ~1000.
 - **`--reasoning-budget 0` on server launch.** Belt-and-braces thinking
   suppression on top of the per-request `enable_thinking: false` (which only
   applies to `/v1/chat/completions`, not `/completion`).

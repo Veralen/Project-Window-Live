@@ -240,11 +240,15 @@ internal sealed class SnipController
             }
             catch (Exception ex)
             {
-                // Design doc "Error handling": timeout/HTTP failure → log, dismiss, no crash.
+                // Log the failure but keep the overlay open with a visible failure
+                // note — silently vanishing reads as "the app did nothing" to the
+                // user. They dismiss with Esc / click-outside as usual.
                 Log($"[pipeline] Translation request failed: {ex.Message}");
-                overlay.HideTranslatingIndicator();
                 if (chipStarted) overlay.HideTranslationChip();
-                CloseAll();
+                // Re-show rather than SetText: the indicator is torn down when the
+                // chip appears, so mid-stream failures would otherwise be invisible.
+                overlay.HideTranslatingIndicator();
+                overlay.ShowTranslatingIndicator("Translation failed — press Esc (details in log)");
                 return;
             }
 
