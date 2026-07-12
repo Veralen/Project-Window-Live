@@ -162,7 +162,15 @@ internal sealed class GameModeController
         _gate.Reset();
         _paused = false;
 
-        _panel ??= new GamePanelWindow();
+        if (_panel is null)
+        {
+            var panel = new GamePanelWindow();
+            // Safety net: if the window is ever closed through any path (WPF
+            // shutdown, an unexpected Close), drop the reference so the next
+            // start builds a fresh instance instead of re-showing a dead one.
+            panel.Closed += (_, _) => { if (ReferenceEquals(_panel, panel)) _panel = null; };
+            _panel = panel;
+        }
         _panel.ShowFor(region, monitor);
 
         _loopCts = new CancellationTokenSource();
@@ -205,7 +213,11 @@ internal sealed class GameModeController
     }
 
     /// <summary>Called on app exit — cancels any in-flight call and disposes the loop/panel.</summary>
-    public void Shutdown() => Stop();
+    public void Shutdown()
+    {
+        Stop();
+        _panel?.CloseForExit(); // Stop() only hides the reusable panel; app exit closes it for real
+    }
 
     private async Task PollLoopAsync(CancellationToken ct)
     {

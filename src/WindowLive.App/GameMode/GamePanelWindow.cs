@@ -163,8 +163,20 @@ internal sealed class GamePanelWindow : Window
             PlaceWindow(hwnd, heightPhysical);
     }
 
-    /// <summary>Hides the panel (game mode stopped). No dismiss gesture reaches this — only the controller does.</summary>
+    /// <summary>
+    /// Hides the panel (game mode stopped). Hide, not Close: WPF forbids showing
+    /// a Window again after Close, and this instance is reused across game-mode
+    /// restarts — closing here made the second Ctrl+Shift+G setup throw
+    /// InvalidOperationException in <see cref="ShowFor"/>. No dismiss gesture
+    /// reaches this — only the controller does.
+    /// </summary>
     public void HidePanel()
+    {
+        try { Hide(); } catch { /* ignore */ }
+    }
+
+    /// <summary>Permanently closes the panel — app shutdown only, never between game-mode sessions.</summary>
+    public void CloseForExit()
     {
         try { Close(); } catch { /* ignore */ }
     }
