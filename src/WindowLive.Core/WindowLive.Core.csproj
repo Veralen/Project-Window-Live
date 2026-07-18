@@ -2,4 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="SearchPioneer.Lingua" Version="1.0.5" />
+  </ItemGroup>
 </Project>

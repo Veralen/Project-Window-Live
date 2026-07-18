@@ -4,79 +4,95 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using WindowLive.App.Hotkeys;
+using WindowLive.App.Ui;
 
 namespace WindowLive.App.Settings;
 
 /// <summary>
-/// A focusable box that captures a keyboard chord. When focused it listens on
-/// PreviewKeyDown (so Tab/Space/arrows are captured for the shortcut rather than
-/// used for focus navigation), ignores bare modifier presses, and builds the
-/// canonical hotkey string via <see cref="HotkeyManager.Format"/> — the single
-/// source of truth shared with the parser. Esc cancels, Backspace/Delete clears.
+/// A focusable chip that captures a keyboard chord, styled per
+/// <c>design_handoff_project_window_1b</c> section 3 (HOTKEYS row): mono
+/// 10.5px text, 1px <see cref="Theme.Border"/>, padding 2,7, radius 0, dark
+/// bg. Click (or Tab) focus enters "recording" mode (border -&gt; mint, text
+/// -&gt; "press keys…"); the next non-modifier key press that forms a valid
+/// chord COMMITS immediately — raises <see cref="Committed"/> with the
+/// canonical string and returns focus to the next tab stop. Owners apply the
+/// rebind live (see <see cref="Settings.SettingsWindow"/>'s per-row apply)
+/// and call <see cref="RevertTo"/> on failure to restore the previous
+/// binding without re-raising <see cref="Committed"/>. Escape, an unsupported
+/// key, or simply losing focus without a valid chord cancels back to the
+/// last committed value — nothing is written until a valid chord commits.
+/// Uses PreviewKeyDown (not KeyDown) so Tab/Space/arrows are captured as
+/// chord input rather than used for focus navigation while recording.
 /// </summary>
 internal sealed class HotkeyCaptureBox : Border
 {
     private readonly TextBlock _text;
-    private static readonly Brush FocusBrush = new SolidColorBrush(Color.FromRgb(0x2D, 0x7D, 0xF6));
-    private static readonly Brush IdleBrush = new SolidColorBrush(Color.FromRgb(0xAD, 0xB5, 0xBD));
+    private string _current = string.Empty;
+    private bool _recording;
 
-    /// <summary>The canonical hotkey string ("Ctrl+Shift+L"), or null if unset.</summary>
-    public string? HotkeyString { get; private set; }
+    /// <summary>The last committed canonical hotkey string ("Ctrl+Shift+T").</summary>
+    public string HotkeyString => _current;
 
-    /// <summary>True when <see cref="HotkeyString"/> is a registrable chord.</summary>
-    public bool IsValid { get; private set; }
-
-    /// <summary>Raised whenever the captured chord changes.</summary>
-    public event EventHandler? HotkeyChanged;
+    /// <summary>
+    /// Raised when the user completes a new valid chord while recording.
+    /// Not raised by <see cref="Initialize"/> or <see cref="RevertTo"/>.
+    /// </summary>
+    public event Action<string>? Committed;
 
     public HotkeyCaptureBox()
     {
         Focusable = true;
         KeyboardNavigation.SetIsTabStop(this, true);
-        Background = Brushes.White;
-        BorderBrush = IdleBrush;
+        Background = Brushes.Transparent;
+        BorderBrush = Theme.Border;
         BorderThickness = new Thickness(1);
-        CornerRadius = new CornerRadius(4);
-        Padding = new Thickness(10, 8, 10, 8);
-        MinHeight = 38;
+        CornerRadius = new CornerRadius(0);
+        Padding = new Thickness(7, 2, 7, 2);
         Cursor = Cursors.Hand;
+        FocusVisualStyle = null;
 
         _text = new TextBlock
         {
-            FontFamily = new FontFamily("Segoe UI"),
-            FontSize = 14,
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = new SolidColorBrush(Color.FromRgb(0x21, 0x25, 0x29)),
+            FontFamily = Theme.MonoFontFamily,
+            FontSize = 10.5,
+            Foreground = Theme.TextPrimary,
         };
         Child = _text;
 
-        // Clicking anywhere in the box starts capture.
         MouseLeftButtonDown += (_, _) => Focus();
         UpdateDisplay();
     }
 
-    /// <summary>Sets the initial chord (e.g. the current config value) without firing change events.</summary>
-    public void Initialize(string? hotkey)
+    /// <summary>Sets the initial chord (e.g. the current config value) without entering recording mode or firing <see cref="Committed"/>.</summary>
+    public void Initialize(string hotkey)
     {
-        HotkeyString = string.IsNullOrWhiteSpace(hotkey) ? null : hotkey;
-        IsValid = HotkeyString is not null && HotkeyManager.TryParse(HotkeyString, out _, out _);
+        _current = hotkey ?? string.Empty;
+        _recording = false;
+        UpdateDisplay();
+    }
+
+    /// <summary>Restores the chip to <paramref name="hotkey"/> after a failed live re-registration attempt, without raising <see cref="Committed"/>.</summary>
+    public void RevertTo(string hotkey)
+    {
+        _current = hotkey ?? string.Empty;
+        _recording = false;
         UpdateDisplay();
     }
 
     protected override void OnGotKeyboardFocus(KeyboardFocusChangedEventArgs e)
     {
         base.OnGotKeyboardFocus(e);
-        BorderBrush = FocusBrush;
-        BorderThickness = new Thickness(2);
+        _recording = true;
+        BorderBrush = Theme.Accent;
         UpdateDisplay();
     }
 
     protected override void OnLostKeyboardFocus(KeyboardFocusChangedEventArgs e)
     {
         base.OnLostKeyboardFocus(e);
-        BorderBrush = IdleBrush;
-        BorderThickness = new Thickness(1);
-        UpdateDisplay();
+        _recording = false;
+        BorderBrush = Theme.Border;
+        UpdateDisplay(); // no commit happened during this focus session -> falls back to _current
     }
 
     protected override void OnPreviewKeyDown(KeyEventArgs e)
@@ -88,20 +104,11 @@ internal sealed class HotkeyCaptureBox : Border
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
         ModifierKeys mods = Keyboard.Modifiers;
 
-        // Esc cancels capture and hands focus back (leaves the current value intact).
+        // Esc cancels capture and hands focus to the next tab stop (leaves the current value intact).
         if (key == Key.Escape && mods == ModifierKeys.None)
         {
             e.Handled = true;
-            MoveFocusAway();
-            return;
-        }
-
-        // Backspace always clears; Delete clears only when pressed alone (with a
-        // modifier it is a legitimate chord key, e.g. Ctrl+Delete).
-        if (key == Key.Back || (key == Key.Delete && mods == ModifierKeys.None))
-        {
-            e.Handled = true;
-            Set(null, valid: false);
+            MoveFocus(new TraversalRequest(FocusNavigationDirection.Next));
             return;
         }
 
@@ -115,60 +122,33 @@ internal sealed class HotkeyCaptureBox : Border
         e.Handled = true; // capture the chord instead of letting Tab/Space/arrows navigate
 
         string? formatted = HotkeyManager.Format(mods, key);
-        if (formatted is null)
+        if (formatted is null || !HotkeyManager.TryParse(formatted, out _, out _))
         {
-            // Unsupported key (e.g. a numpad key). Mark invalid but keep the box open.
-            Set(null, valid: false, display: "Unsupported key — try another");
+            // Unsupported key (e.g. a numpad key) or an unregistrable chord. Stay in
+            // recording mode so the user can try again; losing focus without a valid
+            // chord reverts the display to the last committed value.
+            ShowTransient("Unsupported key — try another");
             return;
         }
 
-        bool valid = HotkeyManager.TryParse(formatted, out _, out _);
-        Set(formatted, valid);
-    }
-
-    private void Set(string? hotkey, bool valid, string? display = null)
-    {
-        HotkeyString = hotkey;
-        IsValid = valid;
-        UpdateDisplay(display);
-        HotkeyChanged?.Invoke(this, EventArgs.Empty);
-    }
-
-    private void MoveFocusAway()
-    {
-        // Push focus to the next tab stop so the box visibly "commits".
+        _current = formatted;
+        _recording = false;
+        UpdateDisplay();
+        Committed?.Invoke(formatted);
         MoveFocus(new TraversalRequest(FocusNavigationDirection.Next));
     }
 
-    private void UpdateDisplay(string? overrideText = null)
+    private void ShowTransient(string message)
     {
-        if (overrideText is not null)
-        {
-            _text.Text = overrideText;
-            _text.Foreground = new SolidColorBrush(Color.FromRgb(0xC0, 0x39, 0x2B));
-            return;
-        }
-
-        if (HotkeyString is not null)
-        {
-            _text.Text = ToDisplay(HotkeyString);
-            _text.Foreground = new SolidColorBrush(Color.FromRgb(0x21, 0x25, 0x29));
-        }
-        else if (IsKeyboardFocused)
-        {
-            _text.Text = "Press the keys you want…";
-            _text.Foreground = new SolidColorBrush(Color.FromRgb(0x86, 0x8E, 0x96));
-        }
-        else
-        {
-            _text.Text = "Click here, then press your shortcut";
-            _text.Foreground = new SolidColorBrush(Color.FromRgb(0x86, 0x8E, 0x96));
-        }
+        _text.Text = message;
+        _text.Foreground = Theme.Error;
     }
 
-    /// <summary>Human-readable form ("Ctrl + Shift + L") of a canonical hotkey string.</summary>
-    public static string ToDisplay(string canonical) =>
-        string.Join(" + ", canonical.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+    private void UpdateDisplay()
+    {
+        _text.Text = _recording ? "press keys…" : _current;
+        _text.Foreground = Theme.TextPrimary;
+    }
 
     private static bool IsModifierKey(Key key) => key is
         Key.LeftCtrl or Key.RightCtrl or

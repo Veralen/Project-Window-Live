@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Project-Window — Option 1b reference</title>
+<style>
+body{margin:0;background:#0f1012;font-family:"Segoe UI",system-ui,sans-serif;color:#e8e8ea;padding:40px 44px}
+a{color:#9ec7ee}
+.dv-oid{font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(255,255,255,.12);color:#e8e8ea;border-radius:5px;text-decoration:none}
+.dv-olabel{display:flex;align-items:baseline;gap:8px;font:400 11.5px/1.3 "Segoe UI",system-ui,sans-serif;color:rgba(255,255,255,.55);margin-bottom:9px}
+.dv-row{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start}
+.dv-card{max-width:100%;background:#17181c;border:1px solid rgba(255,255,255,.08);border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,.4);overflow:hidden}
+.dv-cap{font:400 10.5px ui-monospace,Menlo,monospace;color:rgba(255,255,255,.35);margin:6px 0 0}
+.dv-opt{display:flex;flex-direction:column}
+</style>
+</head>
+<body>
+<!-- ============ 1b MINIMAL ============ -->
+<div class="dv-opt" id="1b">
+<div class="dv-olabel"><a class="dv-oid" href="#1b">1b</a>Minimal utility — flat, crisp 1px lines, mint accent, zero chrome</div>
+<div class="dv-row">
+  <div style="display:flex;flex-direction:column">
+  <div class="dv-card" style="width:200px;padding:24px;display:flex;flex-direction:column;align-items:center;gap:18px;background:#121212">
+    <div style="width:96px;height:96px;border-radius:12px;background:#1c1c1c;border:1px solid #2e2e2e;position:relative;display:flex;align-items:center;justify-content:center">
+      <div style="position:absolute;top:12px;left:12px;width:14px;height:14px;border-top:2px solid #47d6a2;border-left:2px solid #47d6a2"></div>
+      <div style="position:absolute;bottom:12px;right:12px;width:14px;height:14px;border-bottom:2px solid #47d6a2;border-right:2px solid #47d6a2"></div>
+      <span style="font-size:40px;color:#f2f2f2;font-weight:400;line-height:1">文</span>
+    </div>
+    <div style="display:flex;gap:12px;align-items:flex-end">
+      <div style="width:32px;height:32px;border-radius:6px;background:#1c1c1c;border:1px solid #2e2e2e;display:flex;align-items:center;justify-content:center;color:#47d6a2;font-size:14px">文</div>
+      <div style="width:16px;height:16px;border-radius:3px;background:#1c1c1c;border:1px solid #2e2e2e;display:flex;align-items:center;justify-content:center;color:#47d6a2;font-size:8px">文</div>
+    </div>
+  </div>
+  <p class="dv-cap">app icon · 96 / 32 / 16</p>
+  </div>
+  <div style="display:flex;flex-direction:column">
+  <div class="dv-card" style="width:400px;padding:22px;background:#0e0e0e">
+    <div style="width:210px;height:58px;border:1px solid #47d6a2;background:rgba(71,214,162,.04);display:flex;align-items:center;justify-content:center;font:400 10px ui-monospace,monospace;color:#47d6a2;margin:0 0 8px 50px">snipped region</div>
+    <div style="width:330px;background:#161616;border:1px solid #2c2c2c;box-shadow:0 12px 32px rgba(0,0,0,.6)">
+      <div style="padding:14px 16px 12px;font-size:15px;color:#f2f2f2;line-height:1.55">Business hours are from 9:00 AM to 6:00 PM.</div>
+      <div style="padding:0 16px 12px;font-size:11px;color:#5c5c5c;line-height:1.5">営業時間は午前9時から午後6時までです。</div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 16px;border-top:1px solid #242424">
+        <span style="font:400 10px ui-monospace,monospace;color:#47d6a2">JA→EN</span>
+        <span style="font:400 10px ui-monospace,monospace;color:#5c5c5c">qwen2.5:7b</span>
+        <div style="flex:1"></div>
+        <span style="font-size:11px;color:#a8a8a8;cursor:pointer">Copy</span>
+        <span style="font-size:11px;color:#a8a8a8;cursor:pointer">Pin</span>
+        <span style="font-size:11px;color:#5c5c5c;cursor:pointer">✕</span>
+      </div>
+    </div>
+  </div>
+  <p class="dv-cap">result popup · translation first, original demoted</p>
+  </div>
+  <div style="display:flex;flex-direction:column">
+  <div class="dv-card" style="width:400px;background:#121212">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #242424">
+      <span style="font-size:12px;color:#f2f2f2;font-weight:600">Settings</span>
+      <span style="font-size:11px;color:#5c5c5c">✕</span>
+    </div>
+    <div style="padding:16px;display:flex;flex-direction:column;gap:18px">
+      <div style="display:flex;flex-direction:column;gap:7px">
+        <span style="font:600 10px ui-monospace,monospace;color:#5c5c5c;letter-spacing:.08em">MODEL</span>
+        <div style="display:flex;border:1px solid #2c2c2c">
+          <div style="flex:1;padding:7px 10px;font-size:11.5px;color:#0e0e0e;background:#47d6a2;text-align:center;font-weight:600">Ollama</div>
+          <div style="flex:1;padding:7px 10px;font-size:11.5px;color:#a8a8a8;text-align:center">Custom endpoint</div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;border:1px solid #2c2c2c;padding:7px 10px"><span style="font:400 11.5px ui-monospace,monospace;color:#f2f2f2">qwen2.5:7b-instruct</span><span style="font-size:9px;color:#5c5c5c">▾</span></div>
+        <span style="font-size:10.5px;color:#47d6a2">● connected — localhost:11434</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px">
+        <span style="font:600 10px ui-monospace,monospace;color:#5c5c5c;letter-spacing:.08em">LANGUAGES</span>
+        <div style="display:flex;gap:6px;align-items:center">
+          <div style="flex:1;border:1px solid #2c2c2c;padding:7px 10px;font-size:11.5px;color:#f2f2f2;display:flex;justify-content:space-between"><span>Auto-detect</span><span style="font-size:9px;color:#5c5c5c">▾</span></div>
+          <span style="color:#47d6a2;font-size:11px">→</span>
+          <div style="flex:1;border:1px solid #2c2c2c;padding:7px 10px;font-size:11.5px;color:#f2f2f2;display:flex;justify-content:space-between"><span>English</span><span style="font-size:9px;color:#5c5c5c">▾</span></div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px">
+        <span style="font:600 10px ui-monospace,monospace;color:#5c5c5c;letter-spacing:.08em">OCR</span>
+        <div style="display:flex;border:1px solid #2c2c2c">
+          <div style="flex:1;padding:7px 10px;font-size:11.5px;color:#0e0e0e;background:#47d6a2;text-align:center;font-weight:600">Windows OCR</div>
+          <div style="flex:1;padding:7px 10px;font-size:11.5px;color:#a8a8a8;text-align:center;border-left:1px solid #2c2c2c">Tesseract</div>
+          <div style="flex:1;padding:7px 10px;font-size:11.5px;color:#a8a8a8;text-align:center;border-left:1px solid #2c2c2c">Vision</div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px">
+        <span style="font:600 10px ui-monospace,monospace;color:#5c5c5c;letter-spacing:.08em">API KEY</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;border:1px solid #2c2c2c;padding:7px 10px"><span style="font:400 11.5px ui-monospace,monospace;color:#5c5c5c">sk-••••••••••••3f2a</span><span style="font-size:10.5px;color:#47d6a2">show</span></div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px">
+        <span style="font:600 10px ui-monospace,monospace;color:#5c5c5c;letter-spacing:.08em">HOTKEYS</span>
+        <div style="display:flex;flex-direction:column;gap:5px">
+          <div style="display:flex;justify-content:space-between"><span style="font-size:11.5px;color:#a8a8a8">Snip &amp; translate</span><span style="font:400 10.5px ui-monospace,monospace;color:#f2f2f2;border:1px solid #2c2c2c;padding:2px 7px">Ctrl+Shift+T</span></div>
+          <div style="display:flex;justify-content:space-between"><span style="font-size:11.5px;color:#a8a8a8">Translate clipboard</span><span style="font:400 10.5px ui-monospace,monospace;color:#f2f2f2;border:1px solid #2c2c2c;padding:2px 7px">Ctrl+Shift+V</span></div>
+          <div style="display:flex;justify-content:space-between"><span style="font-size:11.5px;color:#a8a8a8">Re-translate last</span><span style="font:400 10.5px ui-monospace,monospace;color:#f2f2f2;border:1px solid #2c2c2c;padding:2px 7px">Ctrl+Shift+R</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <p class="dv-cap">settings · 400px, segmented controls</p>
+  </div>
+  <div style="display:flex;flex-direction:column">
+  <div class="dv-card" style="width:230px;background:#161616;border:1px solid #2c2c2c;border-radius:4px;padding:4px">
+    <div style="display:flex;justify-content:space-between;padding:7px 10px;background:#1f1f1f"><span style="font-size:11.5px;color:#f2f2f2">Snip &amp; translate</span><span style="font:400 9.5px ui-monospace,monospace;color:#5c5c5c">^⇧T</span></div>
+    <div style="display:flex;justify-content:space-between;padding:7px 10px"><span style="font-size:11.5px;color:#c9c9c9">Translate clipboard</span><span style="font:400 9.5px ui-monospace,monospace;color:#5c5c5c">^⇧V</span></div>
+    <div style="display:flex;justify-content:space-between;padding:7px 10px"><span style="font-size:11.5px;color:#c9c9c9">History</span></div>
+    <div style="height:1px;background:#242424;margin:3px 6px"></div>
+    <div style="display:flex;justify-content:space-between;padding:7px 10px"><span style="font-size:11.5px;color:#c9c9c9">Pause hotkeys</span></div>
+    <div style="display:flex;justify-content:space-between;padding:7px 10px"><span style="font-size:11.5px;color:#c9c9c9">Settings</span></div>
+    <div style="height:1px;background:#242424;margin:3px 6px"></div>
+    <div style="display:flex;justify-content:space-between;padding:7px 10px"><span style="font-size:11.5px;color:#c9c9c9">Quit</span></div>
+  </div>
+  <p class="dv-cap">tray menu</p>
+  </div>
+</div>
+</div>
+
+
+</body>
+</html>

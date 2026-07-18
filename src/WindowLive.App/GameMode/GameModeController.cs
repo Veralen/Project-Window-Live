@@ -42,7 +42,7 @@ namespace WindowLive.App.GameMode;
 internal sealed class GameModeController
 {
     private readonly AppConfig _config;
-    private readonly LlamaClient _llm;
+    private readonly TranslationBackend _backend;
     private readonly ServerReadiness _readiness;
     private readonly Action<string, string> _notify;
 
@@ -70,10 +70,10 @@ internal sealed class GameModeController
     /// </summary>
     private string? _lastTranscript;
 
-    public GameModeController(AppConfig config, LlamaClient llm, ServerReadiness readiness, Action<string, string> notify)
+    public GameModeController(AppConfig config, TranslationBackend backend, ServerReadiness readiness, Action<string, string> notify)
     {
         _config = config;
-        _llm = llm;
+        _backend = backend;
         _readiness = readiness;
         _notify = notify;
     }
@@ -293,17 +293,21 @@ internal sealed class GameModeController
             return;
         }
 
-        FrameSignature signature = FrameSignature.Compute(captured.PixelsBgra32, captured.PixelWidth, captured.PixelHeight);
-        if (_gate.Observe(signature) != FrameAction.Send)
-            return;
-
         if (!_readiness.IsReady)
         {
-            // Translation engine still starting (or failed) — skip rather than
-            // spam connection-refused exceptions; the next stable frame retries.
+            // Translation engine still starting (or failed) — skip BEFORE the
+            // gate observes, so a Send is never consumed while we can't act on
+            // it. (Verified live 2026-07-19: with the old order, the gate's
+            // initial Send fired during server startup, was skipped here, and a
+            // fully static region then never triggered again — the first
+            // translation only appeared after the on-screen text changed.)
             AppLog.Write("[GameMode] translation engine not ready — skipping this cycle.");
             return;
         }
+
+        FrameSignature signature = FrameSignature.Compute(captured.PixelsBgra32, captured.PixelWidth, captured.PixelHeight);
+        if (_gate.Observe(signature) != FrameAction.Send)
+            return;
 
         if (Interlocked.CompareExchange(ref _inFlight, 1, 0) != 0)
         {
@@ -318,7 +322,7 @@ internal sealed class GameModeController
         try
         {
             byte[] png = ImageUpscaler.EncodeUpscaledPng(captured);
-            string transcript = await _llm.TranscribeImageAsync(png, requestCts.Token).ConfigureAwait(false);
+            string transcript = await _backend.RecognizeAsync(png, requestCts.Token).ConfigureAwait(false);
 
             string normalized = NormalizeTranscript(transcript);
             if (normalized.Length == 0)
@@ -338,7 +342,7 @@ internal sealed class GameModeController
             // Raw (non-normalized) transcript: StreamTranscriptTranslationAsync
             // does its own line-split/trim; normalized is only for the equality
             // check above.
-            await foreach (string fragment in _llm.StreamTranscriptTranslationAsync(transcript, requestCts.Token).ConfigureAwait(false))
+            await foreach (string fragment in _backend.StreamTranscriptTranslationAsync(transcript, requestCts.Token).ConfigureAwait(false))
             {
                 if (!started)
                 {
