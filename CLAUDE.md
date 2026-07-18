@@ -1,10 +1,18 @@
 # WindowLive
 
-Local (no-cloud) Windows screen translation tool with two modes: one-shot
-desktop snip and continuous live game chat translation. Both modes use a local
-LLM backend (llama.cpp + huihui Qwen3.5-0.8B abliterated) — no ONNX, no Windows.Media.Ocr.
-Product spec and binding decisions: `docs/window-live-design.md` — read it
-before coding anything.
+Windows screen translation tool with two modes: one-shot desktop snip and
+continuous live game chat translation. Two translation providers (Settings →
+MODEL): **Local** (default; embedded llama.cpp + huihui Qwen3.5-0.8B
+abliterated, fully on-device) and **Custom endpoint** (user-supplied
+OpenAI-compatible API — explicit opt-in to off-device calls). Two recognizers
+(Settings → OCR): **Vision** (default; send the image to the provider's
+multimodal model) and **Tesseract** (local OCR → text-only translation). No
+ONNX, no Windows.Media.Ocr. Source-language auto-detection is on-device
+(SearchPioneer.Lingua). Product spec and binding decisions:
+`docs/window-live-design.md` (+ its 2026-07-19 amendment section) — read it
+before coding anything. UI is the design-pack "minimal dark 1b" system
+(`Design Pack/design_handoff_project_window_1b/README.md`); all colors/fonts
+come from `src/WindowLive.App/Ui/Theme.cs`, never raw values.
 
 ## Build & test
 
@@ -21,9 +29,17 @@ before coding anything.
 - All Core geometry is physical pixels, virtual-screen coordinates. DIP
   conversion happens only at the WPF rendering boundary in App. Never
   introduce scaling inside Core.
-- No cloud calls anywhere — all OCR and translation is on-device.
+- The **Local provider makes no cloud calls** — all OCR, detection, and
+  translation on-device. Off-device traffic exists ONLY when the user has
+  explicitly selected the Custom endpoint provider, and goes only to the
+  URL they configured. Never add any other network call. (Amended
+  2026-07-19 from "no cloud calls anywhere" — user decision.)
 - No disk writes for screenshots — encode to base64 in memory, send,
-  discard. Nothing touches disk.
+  discard. Nothing touches disk. (Tesseract consumes PNGs in memory too;
+  the only new disk artifacts are `tessdata/*.traineddata` downloads.)
+- The Custom API key is stored in plain text in config.json (accepted for
+  v1, DPAPI is a known stretch) — treat that file as sensitive; never log
+  the key.
 - Core has no WPF/WinRT dependencies — keeps geometry and config
   unit-testable.
 - Model files live in `models/` (gitignored, populated on first run);
@@ -35,6 +51,28 @@ before coding anything.
 
 ## Key decisions (do not relitigate without good reason)
 
+- **Provider abstraction protects the local path (2026-07-19).**
+  `LlamaClient`/`TranslationPrompt` are behavior-frozen; providers implement
+  `Core.Llm.ITranslationProvider`, recognizers `Core.Ocr.ITextRecognizer`,
+  and controllers only talk to the `TranslationBackend` facade. The Local
+  provider with a null prompt template issues byte-identical requests to the
+  pre-abstraction app (locked by `PromptTemplateTests`).
+- **Prompt templates are user-editable** (Settings → PROMPT, placeholders
+  `{text}/{source}/{target}`); config stores null for "use built-in
+  default" so shipped defaults keep propagating. Local default =
+  `PromptTemplate.DefaultLocalTemplate` ≡ the tested few-shot prompt.
+- **Custom provider translates the whole transcript in ONE streaming
+  chat call** (remote models handle multi-line; per-line round-trips are
+  local-only, an artifact of the 0.8B model). Vision transcription on the
+  custom provider uses its own plain transcription instruction, NOT the
+  local model's empirically-quirky `TranscriptionInstruction`.
+- **Tesseract + auto source OCRs with `eng`** (chicken-and-egg: Tesseract
+  needs a language before OCR, detection runs after). Pick an explicit
+  source language for non-Latin scripts. tessdata_fast files download on
+  demand into `tessdata/` beside the exe (gitignored).
+- **Language detection = SearchPioneer.Lingua** restricted to the
+  `LanguageCatalog` set (short-chat-line accuracy), confidence floor 0.5,
+  best-effort only — a detection failure must never break translation.
 - **No system prompt.** Use `Translate to English: {input}` as the user
   turn only. System prompts tested less reliably at this model size.
 - **Few-shot examples on every call, sentence-level (tested 2026-07-12
@@ -104,9 +142,40 @@ window infrastructure, drag-to-select region UI, and hotkey registration
 carry over. The ONNX translation engine, Windows.Media.Ocr, text block
 grouper, label placer, and language pack installer are all removed.
 
-## Status (2026-07-12)
+## Status (2026-07-19)
 
-v1 is feature-complete and pushed to main. What's verified vs. pending:
+v2 (providers + OCR pipeline + languages + design-pack UI) is implemented on
+top of the v1 baseline below. What's verified vs. pending:
+
+- **Local+vision snip (regression): verified** via `--snip-rect --save-shot`
+  over a Spanish Notepad — new design-pack popup rendered (translation-first,
+  demoted original, mint selection). Byte-equality of the default local
+  prompt is unit-locked (`PromptTemplateTests`).
+- **Local+Tesseract snip: verified** same harness — `eng.traineddata`
+  auto-downloaded to `tessdata/` beside the exe, OCR→/completion translation
+  displayed. Fixed live: TesseractOCR's `Engine` dataPath must be the
+  tessdata folder itself, not its parent.
+- **Custom provider: verified** against `tools/FakeOpenAI` (port 8431) —
+  llama-server/GPU skipped ("Provider is 'custom'…" log line), vision
+  transcription + streamed SSE translation shown in the popup. Also
+  smoke-testable against a standalone llama-server on port 8421 (it IS an
+  OpenAI-compatible multimodal server) — not yet run this session.
+- **Game mode: verified** via `--game-rect` (transcribe + per-line translate
+  tasks visible in server log). Fixed live: readiness check must run BEFORE
+  `FrameGate.Observe`, else the gate's initial Send is consumed during
+  server startup and a static region never retriggers.
+- **Pending user (live) verification:** popup Copy/Pin/✕/Retry interactions,
+  settings window (apply-immediately controls, health-check status line,
+  prompt editing, per-row hotkey rebinds), styled tray menu, new app icon,
+  second live in-game test of the reworked game panel (carried over from
+  v1), Tesseract on real game text, custom endpoint against a real remote
+  API. The `--save-shot` composite clipped the popup footer slightly in
+  shot1 — confirm the footer (badge · model · Copy/Pin/✕) looks right live
+  before chasing it; may be a harness-render artifact only.
+- API key is plaintext in config.json (v1-accepted; DPAPI = stretch).
+  FakeOpenAI modes for error paths: `--mode 401|stall|malformed`.
+
+### v1 status (2026-07-12, superseded but context still valid)
 
 - **Snip mode: verified end-to-end** on real screen content via
   `--snip-rect L,T,W,H --save-shot out.png` (correct translation chip

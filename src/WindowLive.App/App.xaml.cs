@@ -42,6 +42,7 @@ public partial class App : Application
     private HttpClient? _httpClient;
     private LlamaServerManager? _serverManager;
     private LlamaClient? _llmClient;
+    private TranslationBackend? _backend;
     private readonly ServerReadiness _readiness = new();
     private ModelSetupWindow? _setupWindow;
 
@@ -92,7 +93,7 @@ public partial class App : Application
         // Startup visibility: Windows 11 hides new tray icons in the overflow
         // chevron, so users think the app never launched. One balloon per launch
         // tells them it's running and how to reach it, using the real hotkey.
-        string hotkeyDisplay = Settings.HotkeyCaptureBox.ToDisplay(_config.DesktopHotkey);
+        string hotkeyDisplay = _config.DesktopHotkey;
         ShowBalloon("WindowLive is running",
             $"Press {hotkeyDisplay} to snip. Right-click the tray icon for Settings " +
             "(click ^ near the clock if the icon is hidden).");
@@ -107,8 +108,8 @@ public partial class App : Application
         Action<string, string> notify = (title, message) =>
             Dispatcher.Invoke(() => ShowBalloon(title, message));
 
-        _snip = new SnipController(notify, _llmClient!, _readiness);
-        _gameMode = new GameModeController(_config, _llmClient!, _readiness, notify);
+        _snip = new SnipController(notify, _backend!, _readiness);
+        _gameMode = new GameModeController(_config, _backend!, _readiness, notify);
 
         _hotkeys = new HotkeyManager();
         _hotkeys.Triggered += slot =>
@@ -150,8 +151,18 @@ public partial class App : Application
         // Launch llama-server in the background — never block the UI thread. A
         // progress window appears only if a real download happens or startup fails
         // (see StartServerAsync / OnDownloadProgress); a cached-model run warms up
-        // silently.
-        _ = StartServerAsync();
+        // silently. A custom-endpoint provider has no startup phase at all: mark
+        // the gate ready immediately; per-request failures surface in the popup
+        // and the settings health check instead.
+        if (IsCustomProvider)
+        {
+            Log("Provider is 'custom' — skipping llama-server launch; backend readiness is immediate.");
+            _readiness.MarkReady();
+        }
+        else
+        {
+            _ = StartServerAsync();
+        }
 
         // Debug affordances.
         bool snipNow = e.Args.Any(a => string.Equals(a, "--snip", StringComparison.OrdinalIgnoreCase));
@@ -200,36 +211,50 @@ public partial class App : Application
     /// </summary>
     private bool InitializeTranslationBackend()
     {
-        try
+        // GPU detection guards the EMBEDDED server only (no-CPU-fallback hard
+        // rule). A custom-endpoint user needs no local GPU at all — skip the
+        // check entirely so the app runs on any machine in that mode.
+        if (!IsCustomProvider)
         {
-            string binaryName = GpuDetector.SelectServerBinaryName();
-            Log($"GPU detection selected server binary: {binaryName}");
-        }
-        catch (NoSupportedGpuException ex)
-        {
-            Log($"[fatal] {ex.Message}");
-            MessageBox.Show(ex.Message, "WindowLive — no supported GPU",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-            Shutdown();
-            return false;
-        }
-        catch (Exception ex)
-        {
-            // Anything unexpected out of DXGI/interop must still end in a clean
-            // shutdown — a startup that limps on with no backend leaves the tray
-            // alive but every dependent field null (zombie state).
-            Log($"[fatal] GPU detection failed unexpectedly: {ex}");
-            MessageBox.Show(
-                "WindowLive could not detect your GPU and cannot start.\n\nDetails: " + ex.Message +
-                $"\n\nLog: {AppLog.LogPath}",
-                "WindowLive — GPU detection failed",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-            Shutdown();
-            return false;
+            try
+            {
+                string binaryName = GpuDetector.SelectServerBinaryName();
+                Log($"GPU detection selected server binary: {binaryName}");
+            }
+            catch (NoSupportedGpuException ex)
+            {
+                Log($"[fatal] {ex.Message}");
+                MessageBox.Show(ex.Message, "WindowLive — no supported GPU",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                Shutdown();
+                return false;
+            }
+            catch (Exception ex)
+            {
+                // Anything unexpected out of DXGI/interop must still end in a clean
+                // shutdown — a startup that limps on with no backend leaves the tray
+                // alive but every dependent field null (zombie state).
+                Log($"[fatal] GPU detection failed unexpectedly: {ex}");
+                MessageBox.Show(
+                    "WindowLive could not detect your GPU and cannot start.\n\nDetails: " + ex.Message +
+                    $"\n\nLog: {AppLog.LogPath}",
+                    "WindowLive — GPU detection failed",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                Shutdown();
+                return false;
+            }
         }
 
         _httpClient = new HttpClient();
         _llmClient = new LlamaClient(_httpClient, _config);
+        _backend = new TranslationBackend(_llmClient, _httpClient, _config, _readiness);
+
+        // On-device language detection (source language "auto"): warm the
+        // Lingua models in the background so the first snip doesn't pay the
+        // load cost; detection itself is lazy/thread-safe either way.
+        var detector = new Core.Language.TextLanguageDetector();
+        _backend.SetLanguageDetector(detector.DetectCode);
+        _ = Task.Run(() => detector.WarmUpAsync());
         return true;
     }
 
@@ -315,8 +340,10 @@ public partial class App : Application
 
     /// <summary>
     /// Opens the Settings window (single instance — activates the existing one if
-    /// already open). Save live-re-registers the hotkey via <see cref="HotkeyManager.TryReplace"/>
-    /// and only persists on success; on success the current binding + a tray balloon update.
+    /// already open). Settings apply immediately (design pack): backend-affecting
+    /// changes flow through <see cref="ApplyBackendSettings"/>, and each hotkey
+    /// row live-re-registers via <see cref="HotkeyManager.TryReplace"/>, persisting
+    /// only on success (balloon per successful rebind).
     /// </summary>
     private void OpenSettings()
     {
@@ -326,29 +353,91 @@ public partial class App : Application
             return;
         }
 
-        var window = new Settings.SettingsWindow(_config, (slot, hotkey) =>
+        if (_httpClient is null)
         {
-            // _hotkeys is created late in OnStartup; it is null if startup is
-            // still in flight or aborted. Fail the re-bind gracefully — never NRE.
-            if (_hotkeys is null)
-                return (false, "WindowLive is still starting up (or startup failed) — try again in a moment.");
-            bool ok = _hotkeys.TryReplace(slot, hotkey, out string error);
-            if (ok) Log($"Hotkey '{slot}' re-registered to '{hotkey}'.");
-            else Log($"Hotkey '{slot}' re-registration to '{hotkey}' failed: {error}");
-            return (ok, error);
-        });
-        window.Saved += (desktopHotkey, gameHotkey) =>
+            // Backend init failed/aborted — the settings health check and
+            // apply-immediately plumbing need it; nothing sensible to show.
+            Log("Settings requested before backend init — ignoring.");
+            return;
+        }
+
+        var window = new Settings.SettingsWindow(
+            _config,
+            _httpClient,
+            (slot, hotkey) =>
+            {
+                // _hotkeys is created late in OnStartup; it is null if startup is
+                // still in flight or aborted. Fail the re-bind gracefully — never NRE.
+                if (_hotkeys is null)
+                    return (false, "WindowLive is still starting up (or startup failed) — try again in a moment.");
+                bool ok = _hotkeys.TryReplace(slot, hotkey, out string error);
+                if (ok) Log($"Hotkey '{slot}' re-registered to '{hotkey}'.");
+                else Log($"Hotkey '{slot}' re-registration to '{hotkey}' failed: {error}");
+                return (ok, error);
+            },
+            ApplyBackendSettings);
+        window.HotkeyChanged += (slot, hotkey) =>
         {
-            // _config is already updated by the window (same instance), so a later
-            // Settings open shows the current bindings.
-            ShowBalloon("Shortcuts updated",
-                $"Snip & translate: {Settings.HotkeyCaptureBox.ToDisplay(desktopHotkey)} · " +
-                $"Game mode: {Settings.HotkeyCaptureBox.ToDisplay(gameHotkey)}");
+            // _config is already updated by the window (same instance); per-row
+            // apply-immediately means one balloon per successful rebind.
+            string label = slot == HotkeyManager.DesktopSlot ? "Snip & translate" : "Game mode";
+            ShowBalloon("Shortcut updated", $"{label}: {hotkey}");
         };
         window.Closed += (_, _) => _settingsWindow = null;
         _settingsWindow = window;
         window.Show();
         window.Activate();
+    }
+
+    private bool IsCustomProvider =>
+        string.Equals(_config.Provider, "custom", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Called by the Settings window after any backend-affecting setting
+    /// (provider, endpoint, key, model, OCR engine, languages, prompt) has been
+    /// saved to config. Rebuilds the backend facade and reconciles the
+    /// llama-server lifecycle with the selected provider: custom needs no
+    /// server (the gate is marked ready; the running server, if any, is left
+    /// alive so switching back is instant); switching back to local lazily
+    /// GPU-checks and starts the server. Unlike the startup path, a runtime
+    /// GPU failure keeps the app alive — the user just stays on the failed
+    /// readiness state until they pick the custom provider again.
+    /// </summary>
+    internal void ApplyBackendSettings()
+    {
+        if (_backend is null) return;
+        _backend.Rebuild();
+
+        if (IsCustomProvider)
+        {
+            if (!_readiness.IsReady)
+            {
+                _readiness.Reset();
+                _readiness.MarkReady();
+            }
+            return;
+        }
+
+        if (_readiness.IsReady && _serverManager is not null)
+            return; // local already up (or coming up) — nothing to reconcile
+
+        try
+        {
+            string binaryName = GpuDetector.SelectServerBinaryName();
+            Log($"GPU detection (runtime provider switch) selected server binary: {binaryName}");
+        }
+        catch (Exception ex)
+        {
+            Log($"GPU detection failed on runtime provider switch: {ex.Message}");
+            _readiness.Reset();
+            _readiness.MarkFailed(ex.Message);
+            MessageBox.Show(
+                ex.Message + "\n\nSwitch the provider back to Custom endpoint to keep translating.",
+                "WindowLive — no supported GPU",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        _ = StartServerAsync();
     }
 
     private static string? GetArgValue(string[] args, string name)
@@ -383,32 +472,56 @@ public partial class App : Application
 
     private void BuildTrayIcon()
     {
-        var menu = new ContextMenu();
+        // Design-pack tray styling (Ui/TrayMenuStyles.xaml, merged in App.xaml).
+        // Keyed styles, applied explicitly so nothing else in the app inherits
+        // them; missing resources (defensive) just fall back to default chrome.
+        var menuStyle = TryFindResource("TrayContextMenu") as Style;
+        var itemStyle = TryFindResource("TrayMenuItem") as Style;
+        var separatorStyle = TryFindResource("TrayMenuSeparator") as Style;
 
-        var snipItem = new MenuItem { Header = "Snip & translate" };
+        var menu = new ContextMenu();
+        if (menuStyle is not null) menu.Style = menuStyle;
+
+        MenuItem StyledItem(string header)
+        {
+            var item = new MenuItem { Header = header };
+            if (itemStyle is not null) item.Style = itemStyle;
+            return item;
+        }
+        Separator StyledSeparator()
+        {
+            var sep = new Separator();
+            if (separatorStyle is not null) sep.Style = separatorStyle;
+            return sep;
+        }
+
+        var snipItem = StyledItem("Snip & translate");
         snipItem.Click += (_, _) => _snip!.BeginSnip(autoTest: false);
         menu.Items.Add(snipItem);
 
-        var settingsItem = new MenuItem { Header = "Settings…" };
+        var settingsItem = StyledItem("Settings…");
         settingsItem.Click += (_, _) => OpenSettings();
         menu.Items.Add(settingsItem);
 
-        menu.Items.Add(new Separator());
+        menu.Items.Add(StyledSeparator());
 
-        var redefineItem = new MenuItem { Header = "Set up / redefine game chat region" };
+        var redefineItem = StyledItem("Set up / redefine game chat region");
         redefineItem.Click += (_, _) => _gameMode?.OnHotkeyPressed();
         menu.Items.Add(redefineItem);
 
-        _pauseResumeItem = new MenuItem { Header = "Pause translation", IsEnabled = false };
+        _pauseResumeItem = StyledItem("Pause translation");
+        _pauseResumeItem.IsEnabled = false;
         _pauseResumeItem.Click += (_, _) => _gameMode?.TogglePause();
         menu.Items.Add(_pauseResumeItem);
 
-        _stopGameModeItem = new MenuItem { Header = "Stop game mode", IsEnabled = false };
+        _stopGameModeItem = StyledItem("Stop game mode");
+        _stopGameModeItem.IsEnabled = false;
         _stopGameModeItem.Click += (_, _) => _gameMode?.Stop();
         menu.Items.Add(_stopGameModeItem);
 
-        // Refresh game-mode item state right before the menu opens (rather than
-        // reactively on every controller state change) — cheap and always correct.
+        // Refresh game-mode item state and hotkey glyph hints right before the
+        // menu opens (rather than reactively on every state change) — cheap,
+        // always current, and picks up Settings rebinds automatically.
         menu.Opened += (_, _) =>
         {
             bool running = _gameMode?.IsRunning ?? false;
@@ -417,11 +530,13 @@ public partial class App : Application
             _pauseResumeItem.Header = paused ? "Resume translation" : "Pause translation";
             _pauseResumeItem.IsEnabled = running;
             _stopGameModeItem.IsEnabled = running || settingUp;
+            snipItem.InputGestureText = Ui.HotkeyDisplay.ToGlyphs(_config.DesktopHotkey);
+            redefineItem.InputGestureText = Ui.HotkeyDisplay.ToGlyphs(_config.GameModeHotkey);
         };
 
-        menu.Items.Add(new Separator());
+        menu.Items.Add(StyledSeparator());
 
-        var exitItem = new MenuItem { Header = "Exit" };
+        var exitItem = StyledItem("Exit");
         exitItem.Click += (_, _) => Shutdown();
         menu.Items.Add(exitItem);
 
@@ -436,27 +551,47 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Draws a simple 32x32 tray icon (blue rounded square + "W") as a
-    /// System.Drawing.Icon — the reliable H.NotifyIcon path (IconSource requires a
-    /// pack-URI BitmapImage; the Icon property takes any HICON).
+    /// Loads the 32px frame of the design-pack app icon (Assets/WindowLive.ico,
+    /// embedded as a WPF pack resource) for the tray — the reliable H.NotifyIcon
+    /// path (IconSource requires a pack-URI BitmapImage; the Icon property takes
+    /// any HICON). Falls back to a drawn placeholder if the resource is missing,
+    /// so a packaging mistake degrades visibly instead of crashing startup.
     /// </summary>
     private static System.Drawing.Icon BuildTrayIconGraphic()
+    {
+        try
+        {
+            var resource = GetResourceStream(new Uri("pack://application:,,,/Assets/WindowLive.ico"));
+            if (resource is not null)
+            {
+                using var stream = resource.Stream;
+                return new System.Drawing.Icon(stream, 32, 32);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Tray icon resource load failed, using fallback: {ex.Message}");
+        }
+        return BuildFallbackTrayIconGraphic();
+    }
+
+    private static System.Drawing.Icon BuildFallbackTrayIconGraphic()
     {
         using var bmp = new System.Drawing.Bitmap(32, 32, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
         using (var g = System.Drawing.Graphics.FromImage(bmp))
         {
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             g.Clear(System.Drawing.Color.Transparent);
-            using var bg = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(0x2D, 0x7D, 0xF6));
+            using var bg = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(0x1C, 0x1C, 0x1C));
             g.FillRectangle(bg, 2, 2, 28, 28);
             using var font = new System.Drawing.Font("Segoe UI", 16, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Pixel);
-            using var white = new System.Drawing.SolidBrush(System.Drawing.Color.White);
+            using var mint = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(0x47, 0xD6, 0xA2));
             using var sf = new System.Drawing.StringFormat
             {
                 Alignment = System.Drawing.StringAlignment.Center,
                 LineAlignment = System.Drawing.StringAlignment.Center,
             };
-            g.DrawString("W", font, white, new System.Drawing.RectangleF(0, 0, 32, 32), sf);
+            g.DrawString("W", font, mint, new System.Drawing.RectangleF(0, 0, 32, 32), sf);
         }
         IntPtr hIcon = bmp.GetHicon();
         // Clone so the Icon owns managed data independent of the transient HICON.
@@ -479,6 +614,7 @@ public partial class App : Application
         _snip?.CloseAll();
         _hotkeys?.Dispose();
         _tray?.Dispose();
+        _backend?.Dispose(); // releases cached Tesseract engines
         _serverManager?.Dispose(); // kills the llama-server child process
         _httpClient?.Dispose();
         if (_singleInstanceMutex is not null)

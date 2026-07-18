@@ -5,6 +5,8 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using WindowLive.App.Capture;
 using WindowLive.App.Llm;
@@ -17,12 +19,14 @@ namespace WindowLive.App.Overlay;
 /// Orchestrates one snip: capture-first, per-monitor overlays, drag-to-select,
 /// cropping the selected region, and dispatching it to llama-server for
 /// translation (docs/window-live-design.md "Desktop mode (one-shot snip)").
+/// The result renders in a <see cref="TranslationPopupWindow"/> (design-pack
+/// popup) rather than the old in-canvas overlay chip.
 /// </summary>
 internal sealed class SnipController
 {
     private int _inFlightPipelines;
     private readonly Action<string, string> _notify;
-    private readonly LlamaClient _llm;
+    private readonly TranslationBackend _backend;
     private readonly ServerReadiness _readiness;
 
     private readonly List<OverlayWindow> _overlays = new();
@@ -32,10 +36,18 @@ internal sealed class SnipController
     private DispatcherTimer? _autoCloseTimer;
     private CancellationTokenSource? _pipelineCts;
 
-    public SnipController(Action<string, string> notify, LlamaClient llm, ServerReadiness readiness)
+    /// <summary>
+    /// The popup for the current/most recent snip. Cleared by <see cref="CloseAll"/>
+    /// (which closes it unless <see cref="TranslationPopupWindow.IsPinned"/>, in
+    /// which case it is only detached — the window itself survives, closed only
+    /// by its own "✕" from then on). A new snip always creates a new instance.
+    /// </summary>
+    private TranslationPopupWindow? _popup;
+
+    public SnipController(Action<string, string> notify, TranslationBackend backend, ServerReadiness readiness)
     {
         _notify = notify;
-        _llm = llm;
+        _backend = backend;
         _readiness = readiness;
     }
 
@@ -44,7 +56,7 @@ internal sealed class SnipController
     /// <summary>True while any snip pipeline is still running.</summary>
     public bool HasInFlightWork => Volatile.Read(ref _inFlightPipelines) > 0;
 
-    /// <summary>When set, the overlay result is saved to this PNG path after rendering (test/demo).</summary>
+    /// <summary>When set, the overlay+popup result is saved to this PNG path after rendering (test/demo).</summary>
     public string? SaveShotPath { get; set; }
 
     /// <summary>Runs the capture-first snip flow. Must be called on the UI thread.</summary>
@@ -158,11 +170,16 @@ internal sealed class SnipController
     /// <summary>
     /// Crops the selected region off the UI thread, waits for llama-server to be
     /// ready if it isn't yet, then PNG-encodes the crop in memory and streams it
-    /// to llama-server, appending fragments to a translation chip as they arrive
-    /// (docs/window-live-design.md "Desktop mode" + "Error handling"). The chip
-    /// stays up until the user dismisses it (Esc / click-outside / close button);
-    /// every other outcome (empty result, translation-engine failure, request
-    /// timeout/HTTP failure, capture failure) ends the snip by itself.
+    /// to llama-server. Once OCR (<see cref="TranslationBackend.RecognizeAsync"/>)
+    /// returns non-blank text, a <see cref="TranslationPopupWindow"/> is shown near
+    /// the selection with a loading indicator, and streamed translation fragments
+    /// (<see cref="TranslationBackend.StreamTranscriptTranslationAsync"/>, via
+    /// <see cref="StreamTranslationOrNothing"/>) are appended to it as they arrive
+    /// (docs/window-live-design.md "Desktop mode" + "Error handling"). The popup
+    /// stays up until the user dismisses it (Esc / click-outside / its own "✕", or
+    /// survives as a detached window if pinned); every other outcome (empty
+    /// result, translation-engine failure, request timeout/HTTP failure, capture
+    /// failure) ends the snip by itself.
     /// </summary>
     private async Task RunPipelineAsync(OverlayWindow overlay, PixelRect selection)
     {
@@ -217,63 +234,81 @@ internal sealed class SnipController
             byte[] png = ImageUpscaler.EncodeUpscaledPng(region);
 
             var sb = new StringBuilder();
-            bool chipStarted = false;
+            TranslationPopupWindow? popup = null;
+            string transcript;
             try
             {
-                await foreach (string fragment in _llm.StreamImageTranslationAsync(png, ct).ConfigureAwait(true))
+                // Two explicit steps (recognize, then translate) instead of the
+                // old fused StreamImageTranslationAsync — for the default
+                // local+vision configuration this issues the identical two HTTP
+                // calls (the fused method was internally exactly this sequence),
+                // while letting the recognizer be Tesseract and the translator a
+                // remote provider when so configured.
+                transcript = await _backend.RecognizeAsync(png, ct).ConfigureAwait(true);
+
+                if (!string.IsNullOrWhiteSpace(transcript))
                 {
-                    if (!chipStarted)
-                    {
-                        // First fragment arrived — swap the "Translating…" indicator
-                        // for the growing result chip (design doc "Streaming").
-                        overlay.HideTranslatingIndicator();
-                        overlay.ShowTranslationChip(selection);
-                        chipStarted = true;
-                    }
+                    overlay.HideTranslatingIndicator();
+                    popup = new TranslationPopupWindow();
+                    popup.ShowLoading(transcript, _backend.CurrentBadge, _backend.ModelDisplayName);
+                    popup.PlaceNear(selection, overlay.Monitor);
+                    WirePopup(popup, transcript);
+                    _popup = popup;
+                }
+
+                await foreach (string fragment in StreamTranslationOrNothing(transcript, ct).ConfigureAwait(true))
+                {
                     sb.Append(fragment);
-                    overlay.AppendTranslationChipText(fragment);
+                    popup?.AppendTranslation(fragment);
                 }
             }
             catch (OperationCanceledException)
             {
-                throw; // handled by the outer catch below (overlay dismissed mid-stream)
+                throw; // handled by the outer catch below (overlay/popup dismissed mid-stream)
             }
             catch (Exception ex)
             {
-                // Log the failure but keep the overlay open with a visible failure
-                // note — silently vanishing reads as "the app did nothing" to the
-                // user. They dismiss with Esc / click-outside as usual.
+                // Log the failure but keep the popup (if shown) open with a visible
+                // failure note + Retry — silently vanishing reads as "the app did
+                // nothing" to the user. If OCR itself failed before the popup ever
+                // appeared, fall back to the old indicator-message behavior.
                 Log($"[pipeline] Translation request failed: {ex.Message}");
-                if (chipStarted) overlay.HideTranslationChip();
-                // Re-show rather than SetText: the indicator is torn down when the
-                // chip appears, so mid-stream failures would otherwise be invisible.
-                overlay.HideTranslatingIndicator();
-                overlay.ShowTranslatingIndicator("Translation failed — press Esc (details in log)");
+                if (popup is not null)
+                {
+                    popup.ShowError("Translation failed — press Retry (details in log).");
+                }
+                else
+                {
+                    overlay.HideTranslatingIndicator();
+                    overlay.ShowTranslatingIndicator("Translation failed — press Esc (details in log)");
+                }
                 return;
             }
 
-            overlay.HideTranslatingIndicator();
+            overlay.HideTranslatingIndicator(); // no-op if already hidden on the popup path
 
-            if (!chipStarted || sb.ToString().Trim().Length == 0)
+            if (popup is null || sb.ToString().Trim().Length == 0)
             {
                 // Design doc "Error handling": empty/untranslatable input → nothing shown.
                 Log("[pipeline] Empty/untranslatable result — dismissing overlay.");
-                if (chipStarted) overlay.HideTranslationChip();
                 CloseAll();
                 return;
             }
 
+            popup.CompleteTranslation();
             Log($"[pipeline] Translation displayed ({sb.Length} chars).");
+
             if (SaveShotPath is not null)
             {
                 try
                 {
-                    overlay.SaveToPng(SaveShotPath);
-                    Log($"[save-shot] Wrote overlay PNG: {SaveShotPath}");
+                    SaveCompositeShot(overlay, popup, SaveShotPath);
+                    Log($"[save-shot] Wrote overlay+popup PNG: {SaveShotPath}");
                 }
                 catch (Exception ex) { Log($"[save-shot] Failed: {ex.Message}"); }
             }
-            // Overlay stays open from here — dismissed via Esc / click-outside / chip close button.
+            // Overlay + popup stay open from here — dismissed via Esc / click-outside /
+            // the popup's own "✕" (or the popup survives detached if pinned).
         }
         catch (OperationCanceledException)
         {
@@ -287,6 +322,142 @@ internal sealed class SnipController
         }
     }
 
+    /// <summary>
+    /// Wires a freshly-shown popup's "✕" and "Retry" to controller behavior.
+    /// "✕" always closes this popup and dismisses the rest of the snip
+    /// (<see cref="CloseAll"/>), regardless of pin state — an explicit close
+    /// click overrides Pin's "survive Esc/click-outside" protection. "Retry"
+    /// re-runs only the translation step against the cached <paramref name="transcript"/>,
+    /// reusing the still-live pipeline <see cref="CancellationTokenSource"/> if
+    /// one exists, otherwise a fresh one scoped to the retry itself; a simple
+    /// closure-captured flag guards against overlapping retries from repeated
+    /// clicks.
+    /// </summary>
+    private void WirePopup(TranslationPopupWindow popup, string transcript)
+    {
+        popup.CloseRequested += () =>
+        {
+            if (ReferenceEquals(_popup, popup)) _popup = null;
+            try { popup.Close(); } catch { /* ignore */ }
+            CloseAll();
+        };
+
+        bool retryInFlight = false;
+        popup.RetryRequested += () => _ = RetryAsync();
+
+        async Task RetryAsync()
+        {
+            if (retryInFlight) return;
+            retryInFlight = true;
+            CancellationTokenSource? ownedCts = null;
+            try
+            {
+                CancellationToken retryCt;
+                try
+                {
+                    if (_pipelineCts is { } shared && !shared.IsCancellationRequested)
+                        retryCt = shared.Token;
+                    else
+                        throw new ObjectDisposedException(string.Empty);
+                }
+                catch (ObjectDisposedException)
+                {
+                    ownedCts = new CancellationTokenSource();
+                    retryCt = ownedCts.Token;
+                }
+
+                popup.ShowLoading(transcript, _backend.CurrentBadge, _backend.ModelDisplayName);
+                var retrySb = new StringBuilder();
+                try
+                {
+                    await foreach (string fragment in StreamTranslationOrNothing(transcript, retryCt).ConfigureAwait(true))
+                    {
+                        retrySb.Append(fragment);
+                        popup.AppendTranslation(fragment);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    return; // popup/overlay dismissed mid-retry
+                }
+                catch (Exception ex)
+                {
+                    Log($"[pipeline] Retry translation failed: {ex.Message}");
+                    popup.ShowError("Translation failed — press Retry (details in log).");
+                    return;
+                }
+
+                if (retrySb.ToString().Trim().Length == 0)
+                    popup.ShowError("No translation returned.");
+                else
+                    popup.CompleteTranslation();
+            }
+            finally
+            {
+                ownedCts?.Dispose();
+                retryInFlight = false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Composites the popup's rendered appearance onto the overlay's rendered
+    /// appearance (both in-memory, via <see cref="OverlayWindow.RenderToBitmap"/>/
+    /// <see cref="TranslationPopupWindow.RenderToBitmap"/>) and saves the result —
+    /// the --save-shot harness requirement that the saved PNG show the translation
+    /// text at its placed position, now that the popup is a separate top-level
+    /// window rather than part of the overlay's own canvas.
+    /// </summary>
+    private static void SaveCompositeShot(OverlayWindow overlay, TranslationPopupWindow popup, string path)
+    {
+        RenderTargetBitmap? overlayBmp = overlay.RenderToBitmap();
+        if (overlayBmp is null) return;
+
+        BitmapSource finalBmp = overlayBmp;
+        RenderTargetBitmap? popupBmp = popup.RenderToBitmap();
+        if (popupBmp is not null)
+        {
+            double scale = overlay.Monitor.ScaleFactor;
+            PixelRect popupBounds = popup.WindowBoundsPhysical;
+            double offXDip = (popupBounds.X - overlay.Monitor.Bounds.X) / scale;
+            double offYDip = (popupBounds.Y - overlay.Monitor.Bounds.Y) / scale;
+
+            var dv = new DrawingVisual();
+            using (DrawingContext dc = dv.RenderOpen())
+            {
+                dc.DrawImage(overlayBmp, new Rect(0, 0, overlayBmp.PixelWidth / scale, overlayBmp.PixelHeight / scale));
+                dc.DrawImage(popupBmp, new Rect(offXDip, offYDip, popupBmp.PixelWidth / scale, popupBmp.PixelHeight / scale));
+            }
+
+            var composite = new RenderTargetBitmap(overlayBmp.PixelWidth, overlayBmp.PixelHeight,
+                overlay.Monitor.Dpi, overlay.Monitor.Dpi, PixelFormats.Pbgra32);
+            composite.Render(dv);
+            finalBmp = composite;
+        }
+
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(finalBmp));
+        string? dir = System.IO.Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir)) System.IO.Directory.CreateDirectory(dir);
+        using var fs = System.IO.File.Create(path);
+        encoder.Save(fs);
+    }
+
+    /// <summary>
+    /// Mirrors the old fused pipeline's contract: a blank transcript streams
+    /// nothing (the caller's "no fragments" branch then dismisses the overlay,
+    /// per design doc "Error handling"), otherwise the transcript's translation
+    /// is streamed via the active backend.
+    /// </summary>
+    private async IAsyncEnumerable<string> StreamTranslationOrNothing(
+        string transcript, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(transcript))
+            yield break;
+        await foreach (string fragment in _backend.StreamTranscriptTranslationAsync(transcript, ct).ConfigureAwait(true))
+            yield return fragment;
+    }
+
     public void CloseAll()
     {
         _autoCloseTimer?.Stop();
@@ -298,6 +469,18 @@ internal sealed class SnipController
         _overlays.Clear();
         _frozen = null;
         _active = false;
+
+        if (_popup is not null)
+        {
+            var popup = _popup;
+            _popup = null;
+            if (!popup.IsPinned)
+            {
+                try { popup.Close(); } catch { /* ignore */ }
+            }
+            // Pinned: leave it open and untouched — it survives detached from the
+            // controller, closed only by its own "✕" from here on.
+        }
     }
 
     private static void Log(string message)

@@ -8,8 +8,8 @@ using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using WindowLive.App.Capture;
 using WindowLive.App.Native;
+using WindowLive.App.Ui;
 using WindowLive.Core.Geometry;
-using WindowLive.Core.Overlay;
 
 namespace WindowLive.App.Overlay;
 
@@ -28,17 +28,14 @@ internal sealed class OverlayWindow : Window
     private readonly Canvas _canvas;
     private readonly Path _dimPath;
     private readonly System.Windows.Shapes.Rectangle _selectionBorder;
+    private readonly System.Windows.Shapes.Rectangle _selectionFill;
     private Border? _indicator;
     private TextBlock? _indicatorText;
-    private Border? _chip;
-    private TextBlock? _chipText;
-    private Button? _chipCloseButton;
 
     private bool _dragging;
     private Point _dragStartDip;
     private PixelRect _selectionPhysical; // virtual-screen physical px
     private bool _hasSelection;
-    private bool _chipShown;
 
     /// <summary>Raised when the user completes a selection on this monitor (physical px rect).</summary>
     public event Action<OverlayWindow, PixelRect>? SelectionCompleted;
@@ -71,16 +68,26 @@ internal sealed class OverlayWindow : Window
             IsHitTestVisible = false,
         };
 
+        // Snip rectangle per design_handoff_project_window_1b: 1px solid mint
+        // stroke, mint-at-4%-alpha fill (Theme.AccentFill04).
+        _selectionFill = new System.Windows.Shapes.Rectangle
+        {
+            Fill = Theme.AccentFill04,
+            Visibility = Visibility.Collapsed,
+            IsHitTestVisible = false,
+        };
+
         _selectionBorder = new System.Windows.Shapes.Rectangle
         {
-            Stroke = new SolidColorBrush(Color.FromRgb(0x4A, 0xC8, 0xFF)),
-            StrokeThickness = 2,
+            Stroke = Theme.Accent,
+            StrokeThickness = 1,
             Visibility = Visibility.Collapsed,
             IsHitTestVisible = false,
         };
 
         _canvas = new Canvas { Background = Brushes.Transparent };
         _canvas.Children.Add(_dimPath);
+        _canvas.Children.Add(_selectionFill);
         _canvas.Children.Add(_selectionBorder);
 
         _root = new Grid();
@@ -133,11 +140,12 @@ internal sealed class OverlayWindow : Window
     // ---- Selection drag ----
     private void OnMouseDown(object sender, MouseButtonEventArgs e)
     {
-        if (_chipShown)
+        if (_hasSelection)
         {
-            // Once the translation chip is up, a click outside the original
-            // selection dismisses the whole overlay — the chip has its own
-            // explicit close button for "I'm done reading this."
+            // Once a selection is completed, a click outside it dismisses the
+            // whole overlay (and, per SnipController, an unpinned translation
+            // popup with it) — the popup has its own explicit "✕" for "I'm
+            // done reading this."
             var p = DipToVirtual(e.GetPosition(_canvas));
             if (!_selectionPhysical.Contains(p))
                 DismissRequested?.Invoke();
@@ -178,6 +186,7 @@ internal sealed class OverlayWindow : Window
         if (w < 4 || h < 4) // treat a tiny drag/click as nothing
         {
             _selectionBorder.Visibility = Visibility.Collapsed;
+            _selectionFill.Visibility = Visibility.Collapsed;
             UpdateDim();
             return;
         }
@@ -200,6 +209,12 @@ internal sealed class OverlayWindow : Window
 
     private void DrawSelectionDip(Rect dipRect)
     {
+        Canvas.SetLeft(_selectionFill, dipRect.X);
+        Canvas.SetTop(_selectionFill, dipRect.Y);
+        _selectionFill.Width = dipRect.Width;
+        _selectionFill.Height = dipRect.Height;
+        _selectionFill.Visibility = Visibility.Visible;
+
         Canvas.SetLeft(_selectionBorder, dipRect.X);
         Canvas.SetTop(_selectionBorder, dipRect.Y);
         _selectionBorder.Width = dipRect.Width;
@@ -274,121 +289,36 @@ internal sealed class OverlayWindow : Window
     }
 
     /// <summary>
-    /// Shows an initially empty translation chip near the selection
-    /// (docs/window-live-design.md "Overlay chip placement"): below by default,
-    /// flipped above if that would exit the monitor, positioned once via Core's
-    /// <see cref="ChipPlacement"/> — width capped at min(selection width * 1.5,
-    /// 600 DIP) with wrapping. Height is placed using a single-line estimate and
-    /// simply grows downward as text streams in via
-    /// <see cref="AppendTranslationChipText"/>; re-placing on every token would
-    /// be distracting for a chip that only ever holds one short sentence.
+    /// Renders the current overlay (frozen capture + dim + selection) to an
+    /// in-memory bitmap at full physical resolution. Shared by
+    /// <see cref="SaveToPng"/> and <c>SnipController</c>'s --save-shot popup
+    /// compositing (the translation result now lives in a separate
+    /// <c>TranslationPopupWindow</c>, not in this canvas). Must be called on
+    /// the UI thread after layout.
     /// </summary>
-    public void ShowTranslationChip(PixelRect selectionPhysical)
-    {
-        HideTranslationChip();
-
-        double maxWidthDip = Math.Clamp(ToDip(selectionPhysical.Width) * 1.5, 80.0, 600.0);
-
-        _chipText = new TextBlock
-        {
-            Text = string.Empty,
-            Foreground = new SolidColorBrush(Color.FromRgb(0xF0, 0xF0, 0xF0)),
-            FontFamily = new FontFamily("Segoe UI"),
-            FontSize = 14,
-            TextWrapping = TextWrapping.Wrap,
-        };
-
-        var chipBorder = new Border
-        {
-            Background = new SolidColorBrush(Color.FromArgb(0xDD, 0x1E, 0x1E, 0x1E)),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF)),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(10, 8, 10, 8),
-            Width = maxWidthDip,
-            Child = _chipText,
-        };
-
-        // Measure a single non-breaking space at the fixed width to get a stable
-        // single-line height estimate for placement before any real text arrives.
-        _chipText.Text = " ";
-        chipBorder.Measure(new Size(maxWidthDip, double.PositiveInfinity));
-        double estimatedHeightDip = chipBorder.DesiredSize.Height;
-        _chipText.Text = string.Empty;
-
-        int chipWidthPhysical = (int)Math.Round(ToPhysical(maxWidthDip));
-        int chipHeightPhysical = (int)Math.Round(ToPhysical(estimatedHeightDip));
-        int gapPhysical = (int)Math.Round(ToPhysical(8));
-
-        PixelRect placement = ChipPlacement.Place(
-            selectionPhysical, chipWidthPhysical, chipHeightPhysical, _monitor.Bounds, gapPhysical);
-        Rect dip = VirtualToDipRect(placement);
-
-        Canvas.SetLeft(chipBorder, dip.X);
-        Canvas.SetTop(chipBorder, dip.Y);
-
-        _chipCloseButton = new Button
-        {
-            Content = "✕",
-            Width = 24,
-            Height = 24,
-            FontSize = 13,
-            Foreground = Brushes.White,
-            Background = new SolidColorBrush(Color.FromArgb(0xDD, 0x40, 0x20, 0x20)),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(0x66, 0xFF, 0xFF, 0xFF)),
-            BorderThickness = new Thickness(1),
-            Cursor = Cursors.Arrow,
-        };
-        _chipCloseButton.Click += (_, _) => DismissRequested?.Invoke();
-        Canvas.SetLeft(_chipCloseButton, dip.X + dip.Width - 12);
-        Canvas.SetTop(_chipCloseButton, dip.Y - 12);
-
-        _chip = chipBorder;
-        _canvas.Children.Add(_chip);
-        _canvas.Children.Add(_chipCloseButton);
-        _chipShown = true;
-    }
-
-    /// <summary>Appends one streamed fragment to the chip's text. UI thread only.</summary>
-    public void AppendTranslationChipText(string fragment)
-    {
-        if (_chipText is not null)
-            _chipText.Text += fragment;
-    }
-
-    /// <summary>Removes the translation chip and its close button, if shown.</summary>
-    public void HideTranslationChip()
-    {
-        if (_chip is not null)
-        {
-            _canvas.Children.Remove(_chip);
-            _chip = null;
-        }
-        if (_chipCloseButton is not null)
-        {
-            _canvas.Children.Remove(_chipCloseButton);
-            _chipCloseButton = null;
-        }
-        _chipText = null;
-        _chipShown = false;
-    }
-
-    /// <summary>
-    /// Renders the current overlay (frozen capture + dim + selection + any result
-    /// chip) to a PNG at full physical resolution. Used by the --save-shot test/demo
-    /// path so results can be captured without a screenshot (the overlay is topmost
-    /// and would otherwise be masked). Must be called on the UI thread after layout.
-    /// </summary>
-    public void SaveToPng(string path)
+    public RenderTargetBitmap? RenderToBitmap()
     {
         _root.UpdateLayout();
         double dpi = _monitor.Dpi;
         int pxW = (int)Math.Round(_root.ActualWidth * dpi / 96.0);
         int pxH = (int)Math.Round(_root.ActualHeight * dpi / 96.0);
-        if (pxW <= 0 || pxH <= 0) return;
+        if (pxW <= 0 || pxH <= 0) return null;
 
         var rtb = new RenderTargetBitmap(pxW, pxH, dpi, dpi, PixelFormats.Pbgra32);
         rtb.Render(_root);
+        return rtb;
+    }
+
+    /// <summary>
+    /// Renders and saves <see cref="RenderToBitmap"/> to a PNG. Used by the
+    /// --save-shot test/demo path so results can be captured without a real
+    /// screenshot (the overlay is topmost and would otherwise be masked).
+    /// </summary>
+    public void SaveToPng(string path)
+    {
+        RenderTargetBitmap? rtb = RenderToBitmap();
+        if (rtb is null) return;
+
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(rtb));
         var dir = System.IO.Path.GetDirectoryName(path);

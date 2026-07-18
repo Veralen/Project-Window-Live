@@ -3,6 +3,7 @@ obj/
 *.user
 .vs/
 models/
+tessdata/
 *.onnx
 TestResults/
 dist/

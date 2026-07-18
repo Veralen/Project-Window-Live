@@ -52,6 +52,59 @@ public sealed class AppConfig
     public int ServerPort { get; set; } = 8420;
 
     /// <summary>
+    /// Translation backend: "local" (embedded llama-server — the default, fully
+    /// on-device) or "custom" (user-supplied OpenAI-compatible endpoint;
+    /// explicit opt-in to off-device calls).
+    /// </summary>
+    public string Provider { get; set; } = "local";
+
+    /// <summary>
+    /// Custom provider base URL (e.g. "https://api.openai.com" or another
+    /// OpenAI-compatible server); "/v1/chat/completions" is appended. Ignored
+    /// when <see cref="Provider"/> is "local".
+    /// </summary>
+    public string CustomEndpointUrl { get; set; } = "";
+
+    /// <summary>
+    /// Bearer token for the custom endpoint. Stored in plain text in
+    /// config.json for v1 — users should treat this file as sensitive.
+    /// </summary>
+    public string CustomApiKey { get; set; } = "";
+
+    /// <summary>Model name sent in the custom endpoint's "model" field.</summary>
+    public string CustomModelName { get; set; } = "";
+
+    /// <summary>Whole-request timeout for custom endpoint calls (remote latency ≫ local).</summary>
+    public int CustomRequestTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// How captured pixels become text: "vision" (send the image to the
+    /// selected provider's multimodal model — the original pipeline, default)
+    /// or "tesseract" (local Tesseract OCR, then text-only translation).
+    /// </summary>
+    public string OcrEngine { get; set; } = "vision";
+
+    /// <summary>Source language code from LanguageCatalog, or "auto" for on-device detection.</summary>
+    public string SourceLanguage { get; set; } = "auto";
+
+    /// <summary>Target language code from LanguageCatalog.</summary>
+    public string TargetLanguage { get; set; } = "en";
+
+    /// <summary>
+    /// User override of the Local provider's translation prompt template
+    /// ({text}/{source}/{target} placeholders). Null = use the built-in tested
+    /// default (PromptTemplate.DefaultLocalTemplate); "Reset to default" stores
+    /// null so shipped default improvements keep propagating.
+    /// </summary>
+    public string? LocalPromptTemplate { get; set; }
+
+    /// <summary>
+    /// User override of the Custom provider's translation prompt template.
+    /// Null = use PromptTemplate.DefaultCustomTemplate.
+    /// </summary>
+    public string? CustomPromptTemplate { get; set; }
+
+    /// <summary>
     /// Saved game-chat capture region — physical pixels, virtual-screen coordinates
     /// (Core's geometry convention). Zero-sized until game mode setup has run once.
     /// </summary>

@@ -428,3 +428,46 @@ pack setup step.
   DIP conversion at WPF boundary only
 - Core has no WPF/WinRT dependencies
 - Model files gitignored, never committed
+
+---
+
+## Amendment (2026-07-19): providers, OCR pipeline, languages, design-pack UI
+
+User decision superseding "no cloud" above: the app now has a **provider
+abstraction** with two backends and an alternate OCR pipeline. Everything in
+this brief still binds the **Local** provider path, which remains the default
+and is behavior-frozen (see CLAUDE.md "Key decisions").
+
+- **Providers (Settings → MODEL):** `local` — the embedded llama-server
+  exactly as specified above; `custom` — a user-supplied OpenAI-compatible
+  endpoint (`{base}/v1/chat/completions`, bearer auth, streaming). Custom is
+  an explicit opt-in to off-device calls; no other network traffic is ever
+  added. In custom mode the GPU requirement and llama-server launch are
+  skipped entirely.
+- **Recognizers (Settings → OCR):** `vision` — the transcribe-then-translate
+  image pipeline above, via the active provider's multimodal model;
+  `tesseract` — local Tesseract OCR (tessdata_fast, downloaded on demand to
+  `tessdata/`), feeding the same transcript currency (game-mode dedup
+  unchanged). Screenshots still never touch disk.
+- **Languages:** source dropdown (default Auto-detect — on-device
+  SearchPioneer.Lingua, restricted to `LanguageCatalog`, confidence floor
+  0.5) and target dropdown. They feed the `{source}`/`{target}` placeholders
+  of the user-editable prompt templates (Settings → PROMPT; null = built-in
+  default; local default ≡ the tested few-shot prompt, byte-locked by test)
+  and the popup's `JA→EN` badge. The local 0.8B prompt stays English-target
+  unless the user edits its template.
+- **UI:** recreated per the design pack
+  (`Design Pack/design_handoff_project_window_1b/README.md`, "minimal dark
+  1b", high fidelity): translation popup (translation-first, demoted
+  original, badge/model footer, Copy/Pin/✕, loading dots, error+Retry),
+  400px settings window (MODEL / LANGUAGES / OCR / API KEY / PROMPT /
+  HOTKEYS, apply-immediately, no Save button), dark tray menu with hotkey
+  glyphs, 文-tile app icon, mint selection rectangle. Tokens live in
+  `src/WindowLive.App/Ui/Theme.cs`.
+- **Architecture seams:** `Core.Llm.ITranslationProvider`,
+  `Core.Ocr.ITextRecognizer`, `Core.Llm.PromptTemplate`,
+  `Core.Language.LanguageCatalog`/`TextLanguageDetector`; App-side
+  `TranslationBackend` facade (the only thing controllers hold),
+  `LocalLlamaProvider`, `OpenAiCompatProvider`, `TesseractRecognizer`/
+  `VisionRecognizer`/`TessdataStore`, `BackendHealthCheck`.
+  `tools/FakeOpenAI` is the deterministic custom-endpoint test double.

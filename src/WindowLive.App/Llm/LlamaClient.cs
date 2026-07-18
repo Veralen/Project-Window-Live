@@ -209,6 +209,18 @@ public sealed class LlamaClient
         }
     }
 
+    /// <summary>
+    /// ADDITIVE (provider-abstraction seam, 2026-07-18): streams a caller-built
+    /// raw prompt through the exact same /completion path as
+    /// <see cref="StreamTextTranslationAsync"/>. Used only by
+    /// <see cref="LocalLlamaProvider"/> when the user has overridden the local
+    /// prompt template in Settings; the default (null-template) path never goes
+    /// through here, so the tested prompt contract is untouched.
+    /// </summary>
+    internal IAsyncEnumerable<string> StreamRawCompletionAsync(
+        string prompt, int maxTokens, CancellationToken ct = default) =>
+        StreamCompletionAsync(prompt, maxTokens, ct);
+
     /// <summary>Convenience wrapper that aggregates <see cref="StreamTextTranslationAsync"/> into one string.</summary>
     public async Task<string> TranslateTextAsync(string input, CancellationToken ct = default)
     {
